@@ -225,6 +225,11 @@ const App = () => {
         comparativeChartInstance.current.destroy();
         comparativeChartInstance.current = null;
       }
+      // Ensure the chart is destroyed on component unmount
+      if (comparativeChartInstance.current) {
+        comparativeChartInstance.current.destroy();
+        comparativeChartInstance.current = null;
+      }
     };
   }, [selectedProteinForChart, samplesForComparison, isChartLibraryLoaded]);
 
@@ -294,12 +299,12 @@ const App = () => {
     let hasError = false;
 
     for (const sampleInput of sampleInputs) {
-      if (!sampleInput.name.trim()) {
+      // Robust check for name and files
+      if (!sampleInput.name || sampleInput.name.trim() === '') {
         setError(`Error: Sample in slot ${sampleInput.id} does not have a valid name.`);
         hasError = true;
         break;
       }
-      // Now checking for both peptides and proteins files
       if (!sampleInput.files.peptides || !sampleInput.files.proteins) {
         setError(`Error: Sample "${sampleInput.name}" does not have both 'Peptides File' and 'Proteins File' loaded.`);
         hasError = true;
@@ -560,7 +565,7 @@ const App = () => {
           </button>
           <button
             onClick={processAllSamples}
-            disabled={loading || sampleInputs.some(s => !s.name.trim() || !s.files.peptides || !s.files.proteins)}
+            disabled={loading || sampleInputs.some(s => !s.name || s.name.trim() === '' || !s.files.peptides || !s.files.proteins)}
             className="w-full py-3 px-6 bg-blue-600 text-white font-bold rounded-2xl shadow-md hover:bg-blue-700 transition-colors disabled:bg-blue-300 disabled:cursor-not-allowed flex items-center justify-center space-x-2"
           >
             {loading && (
