@@ -6,7 +6,9 @@ const pathogenicPattern = /(-VAR_)|(-[A-Z]\d+[A-Z])/;
 // Main application component
 const App = () => {
   // State to manage multiple file input sets
-  const [sampleInputs, setSampleInputs] = useState([{ id: 1, name: '', files: { peptides: null, proteins: null } }]); // Removed pathogenic_ids file from initial state
+  // Each element in the array represents a "slot" for a sample with its files and name
+  // Reverting to expect 'peptides' and 'proteins' files
+  const [sampleInputs, setSampleInputs] = useState([{ id: 1, name: '', files: { peptides: null, proteins: null } }]);
   const [nextSampleInputId, setNextSampleInputId] = useState(2); // For unique slot IDs
 
   // State to store the results of already processed samples
@@ -29,7 +31,6 @@ const App = () => {
   const comparativeChartInstance = useRef(null);
 
   // Get selected samples for the comparative table and visualizations
-  // This needs to be declared at the top level of the component's render function
   const samplesForComparison = processedSamples.filter(sample =>
     selectedProcessedSampleIds.includes(sample.id)
   );
@@ -50,7 +51,6 @@ const App = () => {
   };
 
   // Generate data for the comparative table, heatmap, and bar chart
-  // This call should also be after samplesForComparison and extractDiseaseAssociation are defined
   const getComparativeTableAndVisualizationData = () => {
     if (samplesForComparison.length === 0) return { headers: [], tableRows: [], visualizationData: [], uniqueProteinAccessions: [] };
 
@@ -68,9 +68,9 @@ const App = () => {
             description: result['Description'],
             totalPeptides: result['# Total Peptides'],
             uniquePeptidesCount: result['# Unique Peptides'],
-            isUniqueGroup: result['Is Protein Group Unique?'],
+            isUniqueGroup: result['Is Unique Group?'],
             peptidesList: result['Unique Peptides List'],
-            diseaseAssociation: extractDiseaseAssociation(result['Description']) // Extract disease association
+            diseaseAssociation: extractDiseaseAssociation(result['Description'])
           });
         }
         // Update max abundance for heatmap scaling
@@ -84,11 +84,11 @@ const App = () => {
     const headers = [
       "Protein Accession",
       "Description",
-      "Disease Association / Clinical Significance", // New column
+      "Disease Association / Clinical Significance",
       "# Total Peptides",
       "# Unique Peptides",
       "Is Unique Group?",
-      "Unique Peptides List", // List of unique peptides
+      "Unique Peptides List",
       ...samplesForComparison.map(sample => `Average Abundance (${sample.name})`)
     ];
 
@@ -97,7 +97,7 @@ const App = () => {
       const rowData = [
         accession,
         details.description,
-        details.diseaseAssociation, // Add disease association to the row
+        details.diseaseAssociation,
         details.totalPeptides,
         details.uniquePeptidesCount,
         details.isUniqueGroup ? 'Yes' : 'No',
@@ -132,13 +132,11 @@ const App = () => {
 
   // useEffect to dynamically load Chart.js and verify its availability
   useEffect(() => {
-    // Check if Chart.js is already available in 'window'
     if (window.Chart) {
       setIsChartLibraryLoaded(true);
       return;
     }
 
-    // If not, try to load it
     const chartjsUrl = 'https://cdnjs.cloudflare.com/ajax/libs/Chart.js/3.7.0/chart.min.js';
     const script = document.createElement('script');
     script.src = chartjsUrl;
@@ -156,12 +154,11 @@ const App = () => {
       const chartScript = document.getElementById('chartjs-script');
       if (chartScript && chartScript.parentNode) chartScript.parentNode.removeChild(chartScript);
     };
-  }, []); // Runs only once on component mount
+  }, []); 
 
   // useEffect to render/update the comparative bar chart
   useEffect(() => {
     if (comparativeChartCanvasRef.current && selectedProteinForChart && isChartLibraryLoaded && samplesForComparison.length > 0) {
-      // Find the protein's data across all selected samples
       const proteinData = samplesForComparison.map(sample => {
         const result = sample.analysisResults.find(res => res['Protein Accession'] === selectedProteinForChart);
         return result ? parseFloat(result['Average Abundance'].toFixed(2)) : 0;
@@ -169,7 +166,6 @@ const App = () => {
 
       const labels = samplesForComparison.map(sample => sample.name);
 
-      // Destroy previous chart instance if it exists
       if (comparativeChartInstance.current) {
         comparativeChartInstance.current.destroy();
       }
@@ -218,33 +214,31 @@ const App = () => {
         }
       });
     } else {
-      // If no protein selected or libraries not loaded, destroy any existing chart
       if (comparativeChartInstance.current) {
         comparativeChartInstance.current.destroy();
         comparativeChartInstance.current = null;
       }
     }
 
-    // Cleanup function
     return () => {
       if (comparativeChartInstance.current) {
         comparativeChartInstance.current.destroy();
         comparativeChartInstance.current = null;
       }
     };
-  }, [selectedProteinForChart, samplesForComparison, isChartLibraryLoaded]); // Dependencies for chart re-render
+  }, [selectedProteinForChart, samplesForComparison, isChartLibraryLoaded]);
 
 
   // Function to add a new sample input slot
   const addSampleInputSlot = () => {
-    setSampleInputs([...sampleInputs, { id: nextSampleInputId, name: '', files: { peptides: null, proteins: null } }]); // Removed pathogenic_ids
+    // Reverting to expect 'peptides' and 'proteins' files for each new slot
+    setSampleInputs([...sampleInputs, { id: nextSampleInputId, name: '', files: { peptides: null, proteins: null } }]);
     setNextSampleInputId(nextSampleInputId + 1);
   };
 
   // Function to remove a sample input slot
   const removeSampleInputSlot = (id) => {
     setSampleInputs(sampleInputs.filter(slot => slot.id !== id));
-    // Also remove from selected if it was there
     setSelectedProcessedSampleIds(prev => prev.filter(sampleId => sampleId !== id));
   };
 
@@ -256,7 +250,7 @@ const App = () => {
   // Handler for changing files for a specific slot
   const handleSampleFileChange = (id, fileType, file) => {
     setSampleInputs(sampleInputs.map(slot =>
-      slot.id === id ? { ...slot.files, [fileType]: file } : slot // Corrected spread operator usage for files
+      slot.id === id ? { ...slot, files: { ...slot.files, [fileType]: file } } : slot // Fixed: Preserve slot properties including 'name'
     ));
   };
 
@@ -276,7 +270,8 @@ const App = () => {
         for (let i = 1; i < rows.length; i++) {
           const values = rows[i].split(',');
           if (values.length !== headers.length) {
-            continue;
+            console.warn(`Skipping row ${i + 1} due to column mismatch.`);
+            continue; 
           }
           const rowObject = {};
           headers.forEach((header, index) => {
@@ -291,17 +286,7 @@ const App = () => {
     });
   };
 
-  // Removed parseText function as it's no longer needed for pathogenic_ids file
-  // const parseText = (file) => {
-  //   return new Promise((resolve, reject) => {
-  //     const reader = new FileReader();
-  //     reader.onload = (e) => resolve(e.target.result);
-  //     reader.onerror = (e) => reject(e);
-  //     reader.readAsText(file);
-  //   });
-  // };
-
-  // Function to process all configured samples
+  // Function to process all configured samples - Reverting to original multi-file processing logic
   const processAllSamples = async () => {
     setLoading(true);
     setError(null);
@@ -314,9 +299,9 @@ const App = () => {
         hasError = true;
         break;
       }
-      // Check only for peptides and proteins files, as pathogenic_ids is removed
+      // Now checking for both peptides and proteins files
       if (!sampleInput.files.peptides || !sampleInput.files.proteins) {
-        setError(`Error: Sample "${sampleInput.name}" does not have all required files loaded.`);
+        setError(`Error: Sample "${sampleInput.name}" does not have both 'Peptides File' and 'Proteins File' loaded.`);
         hasError = true;
         break;
       }
@@ -329,8 +314,8 @@ const App = () => {
       try {
         const peptidesData = await parseCSV(sampleInput.files.peptides);
         const proteinsData = await parseCSV(sampleInput.files.proteins);
-        // Removed call to parseText for pathogenic_ids as it's no longer used
-        // const pathogenicIdsText = await parseText(sampleInput.files.pathogenic_ids);
+
+        // --- Original processing logic (Steps 1-6) ---
 
         // Step 1: Combine data
         const peptidesMap = new Map();
@@ -354,7 +339,7 @@ const App = () => {
         });
 
         // Step 2: Data Normalization
-        const totalArea = mergedData.reduce((sum, item) => sum + item['Area IBIS_DDA_1'], 0); 
+        const totalArea = mergedData.reduce((sum, item) => sum + item['Area IBIS_DDA_1'], 0);
         const normFactor = totalArea > 0 ? 1000000 / totalArea : 1;
         
         const normalizedData = mergedData.map(item => ({
@@ -415,7 +400,7 @@ const App = () => {
             '# Total Peptides': totalPeptides,
             '# Unique Peptides': variant['# Unique Peptides'],
             '# Proteins in Group': proteinsInGroup,
-            'Is Protein Group Unique?': variant['Is Protein Group Unique?'],
+            'Is Unique Group?': variant['Is Protein Group Unique?'],
             'Unique Peptides List': variant['Unique Peptides List'],
           };
         }).sort((a, b) => b['Average Abundance'] - a['Average Abundance']);
@@ -432,7 +417,7 @@ const App = () => {
 
       } catch (err) {
         console.error(`Error processing sample ${sampleInput.name}:`, err);
-        setError(`An error occurred while processing sample "${sampleInput.name}". Please ensure file format is correct.`);
+        setError(`An error occurred while processing sample "${sampleInput.name}". Please ensure both 'Peptides File' and 'Proteins File' are valid CSVs and contain expected columns. Specific error: ${err.message}`);
         hasError = true;
         break;
       }
@@ -464,15 +449,11 @@ const App = () => {
   // Function to get color for heatmap cell based on abundance
   const getHeatmapColor = (abundance) => {
     if (abundance === 0) return 'rgba(240, 240, 240, 1)'; // Light gray for N/A or zero
-    // Scale abundance to a color gradient (e.g., green to dark green or blue to dark blue)
-    // Using HSL for easier gradient control: Hue, Saturation, Lightness
     const hue = 210; // Blue hue
     const saturation = 80; // %
     const maxLightness = 95; // Lightest blue for lowest abundance (non-zero)
     const minLightness = 30; // Darkest blue for highest abundance
 
-    // Calculate lightness based on abundance relative to maxAbundance
-    // Ensure maxAbundance is not zero to prevent division by zero
     const scaledAbundance = maxAbundance > 0 ? (abundance / maxAbundance) : 0;
     const lightness = maxLightness - (scaledAbundance * (maxLightness - minLightness));
     
@@ -568,16 +549,6 @@ const App = () => {
                     className="w-full text-gray-500 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-blue-100 file:text-blue-700 hover:file:bg-blue-200"
                   />
                 </div>
-                {/* Removed Pathogenic IDs File input as parseText is no longer used for it */}
-                {/* <div className="p-2 bg-gray-50 rounded-xl border border-gray-100">
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Pathogenic IDs File (`.txt`)</label>
-                  <input 
-                    type="file" 
-                    accept=".txt"
-                    onChange={(e) => handleSampleFileChange(sampleSlot.id, 'pathogenic_ids', e.target.files[0])} 
-                    className="w-full text-gray-500 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-blue-100 file:text-blue-700 hover:file:bg-blue-200"
-                  />
-                </div> */}
               </div>
             </div>
           ))}
@@ -589,7 +560,7 @@ const App = () => {
           </button>
           <button
             onClick={processAllSamples}
-            disabled={loading || sampleInputs.every(s => !s.name.trim() && !s.files.peptides)} // Disable if no valid inputs
+            disabled={loading || sampleInputs.some(s => !s.name.trim() || !s.files.peptides || !s.files.proteins)}
             className="w-full py-3 px-6 bg-blue-600 text-white font-bold rounded-2xl shadow-md hover:bg-blue-700 transition-colors disabled:bg-blue-300 disabled:cursor-not-allowed flex items-center justify-center space-x-2"
           >
             {loading && (
