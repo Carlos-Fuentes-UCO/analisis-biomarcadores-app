@@ -6,7 +6,7 @@ const pathogenicPattern = /(-VAR_)|(-[A-Z]\d+[A-Z])/;
 // Main application component
 const App = () => {
   // State to manage multiple file input sets
-  const [sampleInputs, setSampleInputs] = useState([{ id: 1, name: '', files: { peptides: null, proteins: null, pathogenic_ids: null } }]);
+  const [sampleInputs, setSampleInputs] = useState([{ id: 1, name: '', files: { peptides: null, proteins: null } }]); // Removed pathogenic_ids file from initial state
   const [nextSampleInputId, setNextSampleInputId] = useState(2); // For unique slot IDs
 
   // State to store the results of already processed samples
@@ -34,7 +34,7 @@ const App = () => {
     selectedProcessedSampleIds.includes(sample.id)
   );
 
-  // Helper function to extract disease association - MOVED HERE
+  // Helper function to extract disease association
   const extractDiseaseAssociation = (description) => {
     let association = '';
     // Regex to find "Association:..." or "ClinicalSignificance:..."
@@ -237,7 +237,7 @@ const App = () => {
 
   // Function to add a new sample input slot
   const addSampleInputSlot = () => {
-    setSampleInputs([...sampleInputs, { id: nextSampleInputId, name: '', files: { peptides: null, proteins: null, pathogenic_ids: null } }]);
+    setSampleInputs([...sampleInputs, { id: nextSampleInputId, name: '', files: { peptides: null, proteins: null } }]); // Removed pathogenic_ids
     setNextSampleInputId(nextSampleInputId + 1);
   };
 
@@ -256,7 +256,7 @@ const App = () => {
   // Handler for changing files for a specific slot
   const handleSampleFileChange = (id, fileType, file) => {
     setSampleInputs(sampleInputs.map(slot =>
-      slot.id === id ? { ...slot, files: { ...slot.files, [fileType]: file } } : slot
+      slot.id === id ? { ...slot.files, [fileType]: file } : slot // Corrected spread operator usage for files
     ));
   };
 
@@ -291,15 +291,15 @@ const App = () => {
     });
   };
 
-  // Function to read a text file
-  const parseText = (file) => {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = (e) => resolve(e.target.result);
-      reader.onerror = (e) => reject(e);
-      reader.readAsText(file);
-    });
-  };
+  // Removed parseText function as it's no longer needed for pathogenic_ids file
+  // const parseText = (file) => {
+  //   return new Promise((resolve, reject) => {
+  //     const reader = new FileReader();
+  //     reader.onload = (e) => resolve(e.target.result);
+  //     reader.onerror = (e) => reject(e);
+  //     reader.readAsText(file);
+  //   });
+  // };
 
   // Function to process all configured samples
   const processAllSamples = async () => {
@@ -314,8 +314,9 @@ const App = () => {
         hasError = true;
         break;
       }
-      if (!sampleInput.files.peptides || !sampleInput.files.proteins || !sampleInput.files.pathogenic_ids) {
-        setError(`Error: Sample "${sampleInput.name}" does not have all files loaded.`);
+      // Check only for peptides and proteins files, as pathogenic_ids is removed
+      if (!sampleInput.files.peptides || !sampleInput.files.proteins) {
+        setError(`Error: Sample "${sampleInput.name}" does not have all required files loaded.`);
         hasError = true;
         break;
       }
@@ -328,7 +329,7 @@ const App = () => {
       try {
         const peptidesData = await parseCSV(sampleInput.files.peptides);
         const proteinsData = await parseCSV(sampleInput.files.proteins);
-        // Removed: pathogenicIdsText is no longer used directly after parsing
+        // Removed call to parseText for pathogenic_ids as it's no longer used
         // const pathogenicIdsText = await parseText(sampleInput.files.pathogenic_ids);
 
         // Step 1: Combine data
@@ -567,7 +568,8 @@ const App = () => {
                     className="w-full text-gray-500 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-blue-100 file:text-blue-700 hover:file:bg-blue-200"
                   />
                 </div>
-                <div className="p-2 bg-gray-50 rounded-xl border border-gray-100">
+                {/* Removed Pathogenic IDs File input as parseText is no longer used for it */}
+                {/* <div className="p-2 bg-gray-50 rounded-xl border border-gray-100">
                   <label className="block text-sm font-medium text-gray-700 mb-1">Pathogenic IDs File (`.txt`)</label>
                   <input 
                     type="file" 
@@ -575,7 +577,7 @@ const App = () => {
                     onChange={(e) => handleSampleFileChange(sampleSlot.id, 'pathogenic_ids', e.target.files[0])} 
                     className="w-full text-gray-500 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-blue-100 file:text-blue-700 hover:file:bg-blue-200"
                   />
-                </div>
+                </div> */}
               </div>
             </div>
           ))}
