@@ -1,5 +1,3 @@
-// Contenido completo de tu código React de la aplicación aquí
-// (El último que te proporcioné con el gráfico comparativo y el heatmap)
 import React, { useState, useEffect, useRef } from 'react';
 
 // Define regular expressions patterns for pathogenic variants
@@ -330,7 +328,8 @@ const App = () => {
       try {
         const peptidesData = await parseCSV(sampleInput.files.peptides);
         const proteinsData = await parseCSV(sampleInput.files.proteins);
-        const pathogenicIdsText = await parseText(sampleInput.files.pathogenic_ids);
+        // Removed: pathogenicIdsText is no longer used directly after parsing
+        // const pathogenicIdsText = await parseText(sampleInput.files.pathogenic_ids);
 
         // Step 1: Combine data
         const peptidesMap = new Map();
