@@ -321,7 +321,7 @@ const App = () => {
       const vennScript = document.getElementById('d3-venn-script');
       if (vennScript && vennScript.parentNode) vennScript.parentNode.removeChild(vennScript);
     };
-  }, []); // Empty dependency array to run only once on mount
+  }, [isD3Loaded, isD3VennLoaded]); // ADDED isD3Loaded, isD3VennLoaded
 
 
   // Generate Venn diagram data (sets and overlaps)
@@ -480,7 +480,7 @@ const App = () => {
         window.d3?.select(vennDiagramRef.current)?.select('svg')?.remove();
         setTooltip(null); // Hide tooltip if diagram is cleared
     }
-  }, [vennOverlaps, isD3Loaded, isD3VennLoaded, tooltip]); // Dependency on vennOverlaps as it holds all data for the diagram
+  }, [vennOverlaps, isD3Loaded, isD3VennLoaded, tooltip, vennSets]); // ADDED vennSets
 
   // Function to add a new sample input slot
   const addSampleInputSlot = () => {
@@ -792,7 +792,7 @@ const App = () => {
     if (!peptideMasterAccessionsHeader) throw new Error(`Missing 'Master Protein Accessions' header in Peptides File for Proteome Discoverer. Searched for normalized 'masterproteinaccessions'. Actual normalized headers: [${actualPeptidesHeadersList.map(normalizeHeader).join(', ')}]`);
     if (!proteinAccessionHeader) throw new Error(`Missing 'Accession' header in Proteins File for Proteome Discoverer. Searched for normalized 'accession'. Actual normalized headers: [${actualProteinsHeadersList.map(normalizeHeader).join(', ')}]`);
     if (!proteinDescriptionHeader) throw new Error(`Missing 'Description' header in Proteins File for Proteome Discoverer. Searched for normalized 'description'. Actual normalized headers: [${actualProteinsHeadersList.map(normalizeHeader).join(', ')}]`);
-    if (!proteinTotalPeptidesHeader) throw new Error(`Missing '# Peptides' header in Proteins File for Proteome Discoverer. Searched for normalized '#peptides'. Actual normalized headers: [${actualProteinsHeadersList.map(normalizeHeader).join(', ')}]`);
+    if (!proteinTotalPeptidesHeader) throw new Error(`Missing '# Peptides' header in Proteins File for Proteome Discoverer. Searched for normalized '#peptides'. Actual normalized headers: [${actualPeptidesHeadersList.map(normalizeHeader).join(', ')}]`);
     if (!proteinUniquePeptidesHeader) throw new Error(`Missing '# Unique Peptides' header in Proteins File for Proteome Discoverer. Searched for normalized '#uniquepeptides'. Actual normalized headers: [${actualProteinsHeadersList.map(normalizeHeader).join(', ')}]`);
     if (!proteinGroupsHeader) throw new Error(`Missing '# Protein Groups' header in Proteins File for Proteome Discoverer. Searched for normalized '#proteingroups'. Actual normalized headers: [${actualProteinsHeadersList.map(normalizeHeader).join(', ')}]`);
     if (!proteinScoreHeader) throw new Error(`Missing 'Score Sequest HT: Sequest HT' header in Proteins File for Proteome Discoverer. Searched for normalized 'scoresequestht:sequestht'. Actual normalized headers: [${actualProteinsHeadersList.map(normalizeHeader).join(', ')}]`);
