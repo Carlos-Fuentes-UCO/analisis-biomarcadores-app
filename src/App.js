@@ -16,6 +16,12 @@ const App = () => {
   // State for the currently selected protein for the comparative bar chart
   const [selectedProteinForChart, setSelectedProteinForChart] = useState('');
 
+  // New state for Venn Diagram sample selection
+  const [selectedVennSampleIds, setSelectedVennSampleIds] = useState([]);
+  const vennDiagramRef = useRef(null);
+  const [isD3Loaded, setIsD3Loaded] = useState(false);
+  const [isD3VennLoaded, setIsD3VennLoaded] = useState(false);
+
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   
@@ -27,6 +33,12 @@ const App = () => {
   // Ref for the comparative bar chart canvas and Chart.js instance
   const comparativeChartCanvasRef = useRef(null);
   const comparativeChartInstance = useRef(null);
+
+  // State for Venn diagram tooltip
+  const [tooltip, setTooltip] = useState(null); // { x, y, content, idList }
+  // State for copy confirmation message
+  const [copyMessage, setCopyMessage] = useState(null); // { message, visible, isError }
+
 
   // Get selected samples for the comparative table and visualizations
   const samplesForComparison = processedSamples.filter(sample =>
@@ -125,26 +137,25 @@ const App = () => {
   useEffect(() => {
     if (window.Chart) {
       setIsChartLibraryLoaded(true);
-      return;
+    } else {
+      const chartjsUrl = 'https://cdnjs.cloudflare.com/ajax/libs/Chart.js/3.7.0/chart.min.js';
+      const script = document.createElement('script');
+      script.src = chartjsUrl;
+      script.id = 'chartjs-script';
+      script.async = true;
+      script.onload = () => {
+        setIsChartLibraryLoaded(true);
+      };
+      script.onerror = () => {
+        setError("Error loading Chart.js library. The chart will not be available.");
+      };
+      document.body.appendChild(script);
+
+      return () => {
+        const chartScript = document.getElementById('chartjs-script');
+        if (chartScript && chartScript.parentNode) chartScript.parentNode.removeChild(chartScript);
+      };
     }
-
-    const chartjsUrl = 'https://cdnjs.cloudflare.com/ajax/libs/Chart.js/3.7.0/chart.min.js';
-    const script = document.createElement('script');
-    script.src = chartjsUrl;
-    script.id = 'chartjs-script';
-    script.async = true;
-    script.onload = () => {
-      setIsChartLibraryLoaded(true);
-    };
-    script.onerror = () => {
-      setError("Error loading Chart.js library. The chart will not be available.");
-    };
-    document.body.appendChild(script);
-
-    return () => {
-      const chartScript = document.getElementById('chartjs-script');
-      if (chartScript && chartScript.parentNode) chartScript.parentNode.removeChild(chartScript);
-    };
   }, []); 
 
   // useEffect to render/update the comparative bar chart
@@ -223,6 +234,253 @@ const App = () => {
     };
   }, [selectedProteinForChart, samplesForComparison, isChartLibraryLoaded]);
 
+  // Load D3 and D3-Venn libraries
+  useEffect(() => {
+    const loadScript = (id, src, globalObjectName) => {
+      return new Promise((resolve, reject) => {
+        // Check if global object already exists
+        if (window[globalObjectName]) {
+          console.log(`${globalObjectName} already loaded.`);
+          resolve(true);
+          return;
+        }
+
+        let script = document.getElementById(id);
+        if (script) {
+          console.log(`Script tag ${id} already exists, waiting for ${globalObjectName}.`);
+          // If script exists but global object isn't there, poll for it
+          const checkGlobal = setInterval(() => {
+            if (window[globalObjectName]) {
+              clearInterval(checkGlobal);
+              resolve(true);
+            }
+          }, 50); // Check every 50ms
+          return;
+        }
+
+        script = document.createElement('script');
+        script.src = src;
+        script.id = id;
+        script.async = true;
+        script.onload = () => {
+          console.log(`Script ${id} loaded, checking for ${globalObjectName}...`);
+          // After script loads, poll for the global object to be defined
+          const checkGlobal = setInterval(() => {
+            if (window[globalObjectName]) {
+              clearInterval(checkGlobal);
+              resolve(true);
+            }
+          }, 50); // Check every 50ms
+        };
+        script.onerror = () => reject(new Error(`Failed to load script: ${src}`));
+        document.body.appendChild(script);
+      });
+    };
+
+    const loadAllVennLibraries = async () => {
+      try {
+        setError(null); // Clear any previous errors before trying to load
+
+        // Load D3 first, wait for window.d3 to be available
+        if (!window.d3) { // Only attempt to load if window.d3 is not yet available
+          console.log("Attempting to load D3...");
+          await loadScript('d3-script', 'https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js', 'd3');
+          setIsD3Loaded(true);
+          console.log("D3 loaded successfully.");
+        } else if (!isD3Loaded) { // D3 is in window, but state isn't updated
+          setIsD3Loaded(true);
+          console.log("D3 already available, state updated.");
+        }
+
+        // Load D3-Venn only if D3 is loaded and D3-Venn isn't already there
+        // Use window.d3 to confirm D3 is available before trying to load D3-Venn
+        if (window.d3 && !window.venn) { // Only attempt to load if window.venn is not yet available
+          console.log("Attempting to load D3-Venn...");
+          // Switched CDN for d3-venn to cdnjs
+          await loadScript('d3-venn-script', 'https://cdnjs.cloudflare.com/ajax/libs/venn.js/0.2.14/venn.min.js', 'venn');
+          setIsD3VennLoaded(true);
+          console.log("D3-Venn loaded successfully.");
+        } else if (window.d3 && window.venn && !isD3VennLoaded) { // D3 and Venn are in window, but state isn't updated
+          setIsD3VennLoaded(true);
+          console.log("D3-Venn already available, state updated.");
+        }
+
+      } catch (err) {
+        console.error("Error loading Venn libraries:", err);
+        setError(`Error cargando librerías para el diagrama de Venn: ${err.message}. Asegúrate de que tienes conexión a internet.`);
+      }
+    };
+
+    loadAllVennLibraries(); // Execute the async loading function
+
+    return () => {
+      // Cleanup: remove the scripts if the component unmounts
+      // Only remove if they were actually added by this component and are not needed elsewhere
+      const d3Script = document.getElementById('d3-script');
+      if (d3Script && d3Script.parentNode) d3Script.parentNode.removeChild(d3Script);
+      const vennScript = document.getElementById('d3-venn-script');
+      if (vennScript && vennScript.parentNode) vennScript.parentNode.removeChild(vennScript);
+    };
+  }, []); // Empty dependency array to run only once on mount
+
+
+  // Generate Venn diagram data (sets and overlaps)
+  const generateVennDiagramData = () => {
+    if (selectedVennSampleIds.length < 2 || selectedVennSampleIds.length > 3) {
+      // Clean up SVG if fewer than 2 or more than 3 samples are selected
+      window.d3?.select(vennDiagramRef.current)?.select('svg')?.remove();
+      return { sets: [], overlaps: [] };
+    }
+
+    const selectedVennSamples = processedSamples.filter(sample =>
+      selectedVennSampleIds.includes(sample.id)
+    );
+
+    // Ensure labels are unique by appending ID if names are duplicated
+    const labelMap = new Map();
+    const proteinSetsIntermediate = selectedVennSamples.map(sample => {
+      let baseLabel = sample.name.trim();
+      if (!baseLabel) {
+        baseLabel = `Sample ${sample.id}`; // Fallback if name is empty
+      }
+
+      let currentLabel = baseLabel;
+      let count = 1;
+      // Ensure unique label for Venn diagram (d3-venn expects unique set labels)
+      while (labelMap.has(currentLabel)) {
+        count++;
+        currentLabel = `${baseLabel} (${count})`;
+      }
+      labelMap.set(currentLabel, true); // Mark this unique label as used
+
+      const proteinAccessions = new Set(sample.analysisResults.map(r => r['Protein Accession']));
+      return { label: currentLabel, size: Number(proteinAccessions.size), proteins: proteinAccessions };
+    });
+
+    const allVennData = [];
+
+    // Add individual sets to allVennData in d3-venn format { sets: ["label"], size: N, proteins: Set }
+    proteinSetsIntermediate.forEach(pSet => {
+      allVennData.push({ sets: [pSet.label], size: pSet.size, proteins: pSet.proteins });
+    });
+
+    // Calculate pairwise overlaps
+    for (let i = 0; i < proteinSetsIntermediate.length; i++) {
+      for (let j = i + 1; j < proteinSetsIntermediate.length; j++) {
+        const set1 = proteinSetsIntermediate[i];
+        const set2 = proteinSetsIntermediate[j];
+        const intersection = new Set([...set1.proteins].filter(x => set2.proteins.has(x)));
+        allVennData.push({ sets: [set1.label, set2.label], size: Number(intersection.size), proteins: intersection });
+      }
+    }
+
+    // Calculate triplet overlap if 3 samples are selected
+    if (proteinSetsIntermediate.length === 3) {
+      const set1 = proteinSetsIntermediate[0];
+      const set2 = proteinSetsIntermediate[1];
+      const set3 = proteinSetsIntermediate[2];
+
+      const intersection12 = new Set([...set1.proteins].filter(x => set2.proteins.has(x)));
+      const intersection123 = new Set([...intersection12].filter(x => set3.proteins.has(x)));
+      
+      allVennData.push({ sets: [set1.label, set2.label, set3.label], size: Number(intersection123.size), proteins: intersection123 });
+    }
+
+    // Filter to ensure all objects have valid 'sets' and 'size' properties, and 'proteins' is a Set
+    const finalVennData = allVennData.filter(d =>
+      d && Array.isArray(d.sets) && d.sets.every(s => typeof s === 'string' && s.length > 0) &&
+      typeof d.size === 'number' && !isNaN(d.size) &&
+      d.proteins instanceof Set
+    );
+
+    return { sets: proteinSetsIntermediate, overlaps: finalVennData };
+  };
+
+  const { sets: vennSets, overlaps: vennOverlaps } = generateVennDiagramData();
+
+  // Render Venn Diagram
+  useEffect(() => {
+    // Only attempt to render if the necessary libraries are loaded, the ref exists,
+    // and there's valid data for the Venn diagram.
+    if (vennDiagramRef.current && vennOverlaps.length > 0 && isD3Loaded && isD3VennLoaded && window.d3 && window.venn) {
+      console.log("Rendering Venn Diagram. vennSets (for debug, not direct use):", vennSets);
+      console.log("Rendering Venn Diagram. vennOverlaps (final data for datum):", vennOverlaps); // Debug log
+
+      // Clear previous SVG content to prevent multiple diagrams stacking
+      window.d3.select(vennDiagramRef.current).select('svg').remove();
+      
+      const chart = window.venn.VennDiagram()
+                                  .width(600)
+                                  .height(400)
+                                  .fontSize("14px")
+                                  .padding(15);
+
+      const svg = window.d3.select(vennDiagramRef.current)
+        .append("svg")
+        .attr("width", 600)
+        .attr("height", 400);
+
+      // Pass the combined and filtered data to d3-venn
+      svg.datum(vennOverlaps).call(chart);
+
+      // Customize text and circles for better readability and aesthetics
+      svg.selectAll(".venn-circle path")
+        .style("fill-opacity", 0.6)
+        .style("stroke-width", 2)
+        .style("stroke-opacity", 0.8)
+        .style("stroke", "#fff"); // White stroke for better separation
+
+      svg.selectAll(".venn-set-label")
+        .style("fill", "#333")
+        .style("font-weight", "bold");
+
+      svg.selectAll(".venn-intersection-label")
+        .style("fill", "#666");
+
+      // Add interactive events for Venn areas
+      svg.selectAll("g.venn-area")
+        .on("mouseover", function(event, d) {
+            if (!d.proteins) return; // Guard against missing protein data
+            const proteinsArray = Array.from(d.proteins);
+            const sampleIds = proteinsArray.slice(0, 5).join(', ') + (proteinsArray.length > 5 ? '...' : '');
+            const content = `<span class="font-bold">Count:</span> ${d.size}<br/><span class="font-bold">IDs (muestra):</span> ${sampleIds}`;
+            setTooltip({
+                x: event.pageX + 10,
+                y: event.pageY - 20,
+                content: content,
+                idList: proteinsArray // Store full list for copying
+            });
+            window.d3.select(this).select("path").style("fill-opacity", 0.75); // Highlight
+        })
+        .on("mousemove", function(event) {
+            if (tooltip) { // Only update position if tooltip is already active
+                setTooltip(prev => prev ? { ...prev, x: event.pageX + 10, y: event.pageY - 20 } : null);
+            }
+        })
+        .on("mouseout", function() {
+            setTooltip(null);
+            window.d3.select(this).select("path").style("fill-opacity", 0.6); // De-highlight
+        })
+        .on("click", function(event, d) {
+            if (!d.proteins) return; // Guard against missing protein data
+            const proteinsArray = Array.from(d.proteins);
+            const idString = proteinsArray.join('\n');
+            navigator.clipboard.writeText(idString).then(() => {
+                setCopyMessage({ message: `¡Copiados ${proteinsArray.length} IDs de proteínas al portapapeles!`, visible: true });
+                setTimeout(() => setCopyMessage(null), 3000); // Hide after 3 seconds
+            }).catch(err => {
+                console.error('Error copying to clipboard:', err);
+                setCopyMessage({ message: 'Error al copiar IDs al portapapeles.', visible: true, isError: true });
+                setTimeout(() => setCopyMessage(null), 3000);
+            });
+        });
+
+    } else if (vennDiagramRef.current) {
+        // Clear SVG if conditions for rendering are not met (e.g., no data, or less than 2/more than 3 selected samples)
+        window.d3?.select(vennDiagramRef.current)?.select('svg')?.remove();
+        setTooltip(null); // Hide tooltip if diagram is cleared
+    }
+  }, [vennOverlaps, isD3Loaded, isD3VennLoaded, tooltip]); // Dependency on vennOverlaps as it holds all data for the diagram
 
   // Function to add a new sample input slot
   const addSampleInputSlot = () => {
@@ -233,12 +491,15 @@ const App = () => {
   // Function to remove a sample input slot
   const removeSampleInputSlot = (id) => {
     setSampleInputs(sampleInputs.filter(slot => slot.id !== id));
+    setProcessedSamples(prev => prev.filter(sample => sample.id !== id)); // Also remove from processed
     setSelectedProcessedSampleIds(prev => prev.filter(sampleId => sampleId !== id));
+    setSelectedVennSampleIds(prev => prev.filter(sampleId => sampleId !== id)); // Also remove from Venn selection
   };
 
   // Handler for changing the name for a specific slot
   const handleSampleNameChange = (id, newName) => {
     setSampleInputs(sampleInputs.map(slot => slot.id === id ? { ...slot, name: newName } : slot));
+    setProcessedSamples(prev => prev.map(sample => sample.id === id ? { ...sample, name: newName } : sample)); // Update name in processed too
   };
 
   // Handler for changing the source software for a specific slot
@@ -256,6 +517,23 @@ const App = () => {
     setSampleInputs(sampleInputs.map(slot =>
       slot.id === id ? { ...slot, files: { ...slot.files, [fileType]: file } } : slot
     ));
+  };
+
+  // Handler for selecting/deselecting samples for Venn Diagram
+  const handleSelectVennSample = (id) => {
+    setSelectedVennSampleIds(prevSelected => {
+      if (prevSelected.includes(id)) {
+        return prevSelected.filter(sampleId => sampleId !== id);
+      } else {
+        // Limit to 3 samples for Venn
+        if (prevSelected.length < 3) {
+          return [...prevSelected, id];
+        } else {
+          setError("Solo puedes seleccionar hasta 3 muestras para el diagrama de Venn.");
+          return prevSelected;
+        }
+      }
+    });
   };
 
   // Function to read and parse a CSV/TSV file manually
@@ -602,7 +880,7 @@ const App = () => {
         }
     });
 
-    const finalResults = uniqueProteinsProcessed.sort((a, b) => b['Average Abundance'] - a['Average Abundance']);
+    const finalResults = uniqueProteinsProcessed.sort((a, b) => b['Average Abundance'] - a['Average Abundanc e']);
 
     return {
       analysisResults: finalResults,
@@ -731,6 +1009,32 @@ const App = () => {
       }
     }
     setLoading(false);
+  };
+
+  // Function to validate the form before enabling the "Process All Samples" button
+  const isFormValid = () => {
+    for (const sample of sampleInputs) {
+      if (!sample.name || sample.name.trim() === '') {
+        console.warn(`Validation: Sample ${sample.id} has no name or only whitespace.`);
+        return false;
+      }
+      if (!sample.files.peptides) {
+        console.warn(`Validation: Sample ${sample.id} is missing a peptides file.`);
+        return false;
+      }
+      // Only require proteins file for specific software types
+      if (
+        (sample.sourceSoftware === 'Peaks Studio' ||
+         sample.sourceSoftware === 'MaxQuant' ||
+         sample.sourceSoftware === 'Proteome Discoverer') &&
+        !sample.files.proteins
+      ) {
+        console.warn(`Validation: Sample ${sample.id} (${sample.sourceSoftware}) is missing a proteins file.`);
+        return false;
+      }
+    }
+    console.log("Validation: All samples are valid.");
+    return true;
   };
 
   // Handler for selecting/deselecting samples for comparison
@@ -881,11 +1185,7 @@ const App = () => {
           <button
             onClick={processAllSamples}
             // Disable if loading, or any sample slot has no name, or is missing required files for its selected software
-            disabled={loading || sampleInputs.some(s => 
-              !s.name || s.name.trim() === '' ||
-              !s.files.peptides || 
-              ((s.sourceSoftware === 'Peaks Studio' || s.sourceSoftware === 'MaxQuant' || s.sourceSoftware === 'Proteome Discoverer') && !s.files.proteins)
-            )}
+            disabled={loading || !isFormValid()}
             className="w-full py-3 px-6 bg-blue-600 text-white font-bold rounded-2xl shadow-md hover:bg-blue-700 transition-colors disabled:bg-blue-300 disabled:cursor-not-allowed flex items-center justify-center space-x-2"
           >
             {loading && (
@@ -930,14 +1230,14 @@ const App = () => {
         )}
         
         {/* Visualizations Section */}
-        {(visualizationData.length > 0 && isChartLibraryLoaded) && (
+        {(processedSamples.length > 0) && (
           <div className="mt-8 p-6 bg-gray-50 rounded-3xl shadow-inner">
-            <h2 className="text-2xl font-bold text-gray-800 mb-6">Visualizations</h2>
+            <h2 className="text-2xl font-bold text-gray-800 mb-6">Visualizaciones</h2>
 
             {/* Comparative Bar Chart */}
-            <h3 className="text-xl font-bold text-gray-700 mb-4">Comparative Bar Chart (Select a Protein)</h3>
+            <h3 className="text-xl font-bold text-gray-700 mb-4">Gráfico de Barras Comparativo (Selecciona una Proteína)</h3>
             <div className="mb-4">
-              <label htmlFor="proteinForChart" className="block text-sm font-medium text-gray-700 mb-1">Select Protein Accession:</label>
+              <label htmlFor="proteinForChart" className="block text-sm font-medium text-gray-700 mb-1">Seleccionar Acceso de Proteína:</label>
               <select
                 id="proteinForChart"
                 value={selectedProteinForChart}
@@ -945,32 +1245,36 @@ const App = () => {
                 className="w-full p-2 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500"
                 disabled={!allUniqueProteins || allUniqueProteins.length === 0}
               >
-                <option value="">-- Select a Protein --</option>
+                <option value="">-- Selecciona una Proteína --</option>
                 {allUniqueProteins.map(accession => (
                   <option key={accession} value={accession}>{accession}</option>
                 ))}
               </select>
             </div>
-            {selectedProteinForChart && (
+            {selectedProteinForChart && isChartLibraryLoaded ? (
               <div className="mb-8 p-4 bg-white rounded-2xl border border-gray-200 shadow-sm" style={{ height: '400px', width: '100%' }}>
                 <canvas ref={comparativeChartCanvasRef}></canvas>
               </div>
-            )}
-            {!selectedProteinForChart && (
+            ) : (
                 <div className="mb-8 p-4 text-gray-600 bg-gray-100 rounded-2xl border border-gray-200">
-                    <p className="font-semibold">Select a protein from the dropdown above to view its comparative abundance across samples.</p>
+                    <p className="font-semibold">Selecciona una proteína del menú desplegable de arriba para ver su abundancia comparativa entre muestras.</p>
+                </div>
+            )}
+            {!isChartLibraryLoaded && (
+                <div className="mt-4 p-4 text-gray-700 bg-gray-100 rounded-2xl border border-gray-200">
+                    <p className="font-semibold">Cargando la librería de gráficos... Por favor, espera a que aparezcan las visualizaciones.</p>
                 </div>
             )}
 
 
             {/* Heatmap */}
-            <h3 className="text-xl font-bold text-gray-700 mb-4 mt-8">Comparative Abundance Heatmap</h3>
+            <h3 className="text-xl font-bold text-gray-700 mb-4 mt-8">Mapa de Calor de Abundancia Comparativa</h3>
             <div className="overflow-x-auto p-4 bg-white rounded-2xl border border-gray-200 shadow-sm">
                 {visualizationData.length > 0 && samplesForComparison.length > 0 ? (
                     <div className="inline-block min-w-full">
                         {/* Heatmap Header (Sample Names) */}
                         <div className="flex flex-row sticky top-0 bg-white z-10 border-b border-gray-200">
-                            <div className="flex-shrink-0" style={{ width: '200px', padding: '8px', fontWeight: 'bold' }}>Protein Accession</div>
+                            <div className="flex-shrink-0" style={{ width: '200px', padding: '8px', fontWeight: 'bold' }}>Acceso de Proteína</div>
                             {samplesForComparison.map(sample => (
                                 <div key={sample.id} className="flex-shrink-0 text-center" style={{ width: '100px', padding: '8px', fontWeight: 'bold' }}>{sample.name}</div>
                             ))}
@@ -990,7 +1294,7 @@ const App = () => {
                                             padding: '8px', 
                                             backgroundColor: getHeatmapColor(proteinRow.abundancesBySample[sample.name]),
                                             color: proteinRow.abundancesBySample[sample.name] > maxAbundance / 2 ? 'white' : 'black', // Text color for contrast
-                                            borderRight: '1px solid #e5e7eb'
+                                            borderRight: '1% solid #e5e7eb'
                                         }}
                                         title={`Abundancia: ${proteinRow.abundancesBySample[sample.name].toFixed(2)}`}
                                     >
@@ -1002,29 +1306,59 @@ const App = () => {
                     </div>
                 ) : (
                     <div className="p-4 text-gray-600 bg-gray-100 rounded-2xl border border-gray-200">
-                        <p className="font-semibold">No data available for heatmap. Process samples and select them for comparison.</p>
+                        <p className="font-semibold">No hay datos disponibles para el mapa de calor. Procesa las muestras y selecciónalas para comparar.</p>
                     </div>
                 )}
             </div>
+
+            {/* Venn Diagram Section */}
+            <h3 className="text-xl font-bold text-gray-700 mb-4 mt-8">Análisis por Diagramas de Venn</h3>
+            <div className="mb-4">
+                <label className="block text-sm font-medium text-gray-700 mb-1">Selecciona 2 o 3 muestras para el Diagrama de Venn:</label>
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                {processedSamples.map(sample => (
+                    <label key={sample.id} className="inline-flex items-center p-2 bg-white rounded-xl border border-gray-200 shadow-sm cursor-pointer hover:bg-gray-100 transition-colors">
+                    <input
+                        type="checkbox"
+                        checked={selectedVennSampleIds.includes(sample.id)}
+                        onChange={() => handleSelectVennSample(sample.id)}
+                        className="form-checkbox h-5 w-5 text-blue-600 rounded focus:ring-blue-500"
+                        disabled={!selectedVennSampleIds.includes(sample.id) && selectedVennSampleIds.length >= 3}
+                    />
+                    <span className="ml-2 text-gray-700 font-medium">{sample.name}</span>
+                    </label>
+                ))}
+                </div>
+            </div>
+            {selectedVennSampleIds.length >= 2 && selectedVennSampleIds.length <= 3 && isD3Loaded && isD3VennLoaded && window.d3 && window.venn ? (
+                <div className="mb-8 p-4 bg-white rounded-2xl border border-gray-200 shadow-sm flex justify-center items-center" style={{ height: '450px', width: '100%' }}>
+                    <div ref={vennDiagramRef} className="venn-container"></div>
+                </div>
+            ) : (
+                <div className="mb-8 p-4 text-gray-600 bg-gray-100 rounded-2xl border border-gray-200">
+                    <p className="font-semibold">Por favor, selecciona entre 2 y 3 muestras procesadas para generar el Diagrama de Venn.</p>
+                </div>
+            )}
+            {processedSamples.length > 0 && (!isD3Loaded || !isD3VennLoaded) && (
+                <div className="mt-4 p-4 text-gray-700 bg-gray-100 rounded-2xl border border-gray-200">
+                    <p className="font-semibold">Cargando librerías necesarias para el Diagrama de Venn (D3 y D3-Venn)... Por favor, espera.</p>
+                </div>
+            )}
+
           </div>
         )}
-        {!visualizationData.length > 0 && processedSamples.length > 0 && (
-             <div className="mt-8 p-4 text-gray-700 bg-gray-100 rounded-2xl border border-gray-200">
-                <p className="font-semibold">Please select samples for comparison to generate visualizations.</p>
-            </div>
-        )}
-        {(processedSamples.length > 0 && !isChartLibraryLoaded) && (
+        {!processedSamples.length > 0 && (
             <div className="mt-8 p-4 text-gray-700 bg-gray-100 rounded-2xl border border-gray-200">
-                <p className="font-semibold">Loading chart library... Please wait for visualizations to appear.</p>
+                <p className="font-semibold">Procesa al menos dos muestras para generar visualizaciones y la tabla comparativa.</p>
             </div>
         )}
 
         {/* Comparative Table Section */}
         {comparativeTableRows.length > 0 && (
           <div className="mt-8">
-            <h2 className="text-2xl font-bold text-gray-800 mb-4">Comparative Abundance Table</h2>
+            <h2 className="text-2xl font-bold text-gray-800 mb-4">Tabla de Abundancia Comparativa</h2>
             <p className="text-gray-600 mb-4 text-sm italic">
-                Normalized abundances for the selected samples.
+                Abundancias normalizadas para las muestras seleccionadas.
             </p>
             <div className="flex flex-col sm:flex-row space-y-4 sm:space-y-0 sm:space-x-4 mb-4">
               <button
@@ -1032,7 +1366,7 @@ const App = () => {
                 disabled={isExporting || comparativeTableRows.length === 0}
                 className="w-full py-3 px-6 bg-green-600 text-white font-bold rounded-2xl shadow-md hover:bg-green-700 transition-colors disabled:bg-green-300 disabled:cursor-not-allowed flex items-center justify-center space-x-2"
               >
-                <span>{isExporting ? "Exporting..." : "Export Comparative Table to Excel (CSV)"}</span>
+                <span>{isExporting ? "Exportando..." : "Exportar Tabla Comparativa a Excel (CSV)"}</span>
               </button>
             </div>
             <div id="comparative-results-table" className="overflow-x-auto rounded-xl shadow-inner border border-gray-200">
@@ -1056,6 +1390,37 @@ const App = () => {
               </table>
             </div>
           </div>
+        )}
+
+        {/* Custom Tooltip for Venn Diagram */}
+        {tooltip && (
+            <div
+                style={{
+                    position: 'absolute',
+                    left: tooltip.x,
+                    top: tooltip.y,
+                    pointerEvents: 'none', // Allow events to pass through to underlying elements
+                    zIndex: 1000,
+                    backgroundColor: 'rgba(0, 0, 0, 0.8)',
+                    color: 'white',
+                    padding: '8px 12px',
+                    borderRadius: '8px',
+                    fontSize: '0.85rem',
+                    maxWidth: '300px',
+                    lineHeight: '1.4',
+                    boxShadow: '0 4px 12px rgba(0,0,0,0.2)',
+                    backdropFilter: 'blur(5px)',
+                    WebkitBackdropFilter: 'blur(5px)'
+                }}
+                dangerouslySetInnerHTML={{ __html: tooltip.content }}
+            />
+        )}
+
+        {/* Custom Copy Message */}
+        {copyMessage && (
+            <div className={`fixed bottom-4 right-4 p-3 rounded-lg shadow-lg text-white transition-opacity duration-300 ${copyMessage.isError ? 'bg-red-500' : 'bg-green-500'}`}>
+                {copyMessage.message}
+            </div>
         )}
       </div>
     </div>
