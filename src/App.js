@@ -490,8 +490,9 @@ const App = () => {
 
 
     // Required headers for Proteome Discoverer (using their raw names)
-    const requiredPeptidesHeadersRaw = ['Sequence', 'Master Protein Accessions'];
-    const requiredProteinsHeadersRaw = ['Accession', 'Description', '# Peptides', '# Unique Peptides', '# Protein Groups', 'Score Sequest HT: Sequest HT'];
+    // Removed 'requiredPeptidesHeadersRaw' and 'requiredProteinsHeadersRaw' as they were declared but never used.
+    // const requiredPeptidesHeadersRaw = ['Sequence', 'Master Protein Accessions'];
+    // const requiredProteinsHeadersRaw = ['Accession', 'Description', '# Peptides', '# Unique Peptides', '# Protein Groups', 'Score Sequest HT: Sequest HT'];
     const abundanceColumnRaw = 'Sum PEP Score'; // The name you identified for abundance
 
     // Find and validate exact header names
