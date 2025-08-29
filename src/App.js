@@ -513,7 +513,7 @@ const App = () => {
     if (!proteinTotalPeptidesHeader) throw new Error(`Missing '# Peptides' header in Proteins File for Proteome Discoverer. Searched for normalized '#peptides'. Actual normalized headers: [${actualProteinsHeadersList.map(normalizeHeader).join(', ')}]`);
     if (!proteinUniquePeptidesHeader) throw new Error(`Missing '# Unique Peptides' header in Proteins File for Proteome Discoverer. Searched for normalized '#uniquepeptides'. Actual normalized headers: [${actualProteinsHeadersList.map(normalizeHeader).join(', ')}]`);
     if (!proteinGroupsHeader) throw new Error(`Missing '# Protein Groups' header in Proteins File for Proteome Discoverer. Searched for normalized '#proteingroups'. Actual normalized headers: [${actualProteinsHeadersList.map(normalizeHeader).join(', ')}]`);
-    if (!proteinScoreHeader) throw new Error(`Missing 'Score Sequest HT: Sequest HT' header in Proteins File for Proteome Discoverer. Searched for normalized 'scoresequestht:sequestht'. Actual normalized headers: [${actualProteationsHeadersList.map(normalizeHeader).join(', ')}]`);
+    if (!proteinScoreHeader) throw new Error(`Missing 'Score Sequest HT: Sequest HT' header in Proteins File for Proteome Discoverer. Searched for normalized 'scoresequestht:sequestht'. Actual normalized headers: [${actualProteinsHeadersList.map(normalizeHeader).join(', ')}]`);
     if (!proteinAbundanceHeader) throw new Error(`Missing '${abundanceColumnRaw}' header in Proteins File for Proteome Discoverer, needed for abundance calculation. Searched for normalized 'sumpepscore'. Actual normalized headers: [${actualProteinsHeadersList.map(normalizeHeader).join(', ')}]`);
 
 
