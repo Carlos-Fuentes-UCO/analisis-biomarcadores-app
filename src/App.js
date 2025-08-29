@@ -3,6 +3,19 @@ import React, { useState, useEffect, useRef } from 'react';
 // Define regular expressions patterns for pathogenic variants
 const pathogenicPattern = /(-VAR_)|(-[A-Z]\d+[A-Z])/;
 
+/**
+ * @typedef {object} ProteinData - Formato de Datos Unificado (FDU) para una proteína.
+ * @property {string} accession - ID de acceso principal de la proteína (ej: "P12345").
+ * @property {string} description - Descripción completa de la proteína (ej: "Vimentin OS=Homo sapiens...").
+ * @property {string} diseaseAssociation - Asociación de enfermedad o significado clínico (ej: "Cáncer", "N/A").
+ * @property {number} averageAbundance - Abundancia promedio normalizada.
+ * @property {number} totalPeptides - Número total de péptidos identificados para esta proteína.
+ * @property {number} uniquePeptidesCount - Número de péptidos únicos.
+ * @property {boolean} isUniqueGroup - Indica si es un grupo de proteínas único (true/false).
+ * @property {string} uniquePeptidesList - Lista de secuencias de péptidos únicos (separados por ';').
+ * @property {number} [rawScore] - Puntuación bruta del software de origen (opcional, ej: -10lgP de Peaks).
+ */
+
 // Main application component
 const App = () => {
   // State to manage multiple file input sets
@@ -60,28 +73,29 @@ const App = () => {
   };
 
   // Generate data for the comparative table, heatmap, and bar chart
+  // This function now expects processed samples to already contain data in the FDU.
   const getComparativeTableAndVisualizationData = () => {
     if (samplesForComparison.length === 0) return { headers: [], tableRows: [], visualizationData: [], uniqueProteinAccessions: [] };
 
     const uniqueProteinAccessions = new Set();
-    const proteinDetailsMap = new Map();
+    const proteinDetailsMap = new Map(); // Stores FDU protein data
     let maxAbundance = 0;
 
     samplesForComparison.forEach(sample => {
-      sample.analysisResults.forEach(result => {
-        uniqueProteinAccessions.add(result['Protein Accession']);
-        if (!proteinDetailsMap.has(result['Protein Accession'])) {
-          proteinDetailsMap.set(result['Protein Accession'], {
-            description: result['Description'],
-            totalPeptides: result['# Total Peptides'],
-            uniquePeptidesCount: result['# Unique Peptides'],
-            isUniqueGroup: result['Is Unique Group?'],
-            peptidesList: result['Unique Peptides List'],
-            diseaseAssociation: extractDiseaseAssociation(result['Description'])
+      sample.analysisResults.forEach(result => { // result is now a ProteinData object (FDU)
+        uniqueProteinAccessions.add(result.accession);
+        if (!proteinDetailsMap.has(result.accession)) {
+          proteinDetailsMap.set(result.accession, {
+            description: result.description,
+            totalPeptides: result.totalPeptides,
+            uniquePeptidesCount: result.uniquePeptidesCount,
+            isUniqueGroup: result.isUniqueGroup,
+            uniquePeptidesList: result.uniquePeptidesList,
+            diseaseAssociation: result.diseaseAssociation // Already extracted in adapter
           });
         }
-        if (result['Average Abundance'] > maxAbundance) {
-          maxAbundance = result['Average Abundance'];
+        if (result.averageAbundance > maxAbundance) {
+          maxAbundance = result.averageAbundance;
         }
       });
     });
@@ -106,11 +120,11 @@ const App = () => {
         details.totalPeptides,
         details.uniquePeptidesCount,
         details.isUniqueGroup ? 'Yes' : 'No',
-        details.peptidesList
+        details.uniquePeptidesList
       ];
       samplesForComparison.forEach(sample => {
-        const result = sample.analysisResults.find(res => res['Protein Accession'] === accession);
-        rowData.push(result ? result['Average Abundance'].toFixed(2) : 'N/A');
+        const result = sample.analysisResults.find(res => res.accession === accession); // Use FDU field
+        rowData.push(result ? result.averageAbundance.toFixed(2) : 'N/A'); // Use FDU field
       });
       return rowData;
     });
@@ -118,11 +132,11 @@ const App = () => {
     const visualizationData = Array.from(uniqueProteinAccessions).map(accession => {
         const abundancesBySample = {};
         samplesForComparison.forEach(sample => {
-            const result = sample.analysisResults.find(res => res['Protein Accession'] === accession);
-            abundancesBySample[sample.name] = result ? parseFloat(result['Average Abundance'].toFixed(2)) : 0;
+            const result = sample.analysisResults.find(res => res.accession === accession); // Use FDU field
+            abundancesBySample[sample.name] = result ? parseFloat(result.averageAbundance.toFixed(2)) : 0; // Use FDU field
         });
         return {
-            proteinAccession: accession,
+            proteinAccession: accession, // Still using this for chart selection
             abundancesBySample: abundancesBySample
         };
     });
@@ -162,8 +176,9 @@ const App = () => {
   useEffect(() => {
     if (comparativeChartCanvasRef.current && selectedProteinForChart && isChartLibraryLoaded && samplesForComparison.length > 0) {
       const proteinData = samplesForComparison.map(sample => {
-        const result = sample.analysisResults.find(res => res['Protein Accession'] === selectedProteinForChart);
-        return result ? parseFloat(result['Average Abundance'].toFixed(2)) : 0;
+        // Now using FDU fields
+        const result = sample.analysisResults.find(res => res.accession === selectedProteinForChart);
+        return result ? parseFloat(result.averageAbundance.toFixed(2)) : 0;
       });
 
       const labels = samplesForComparison.map(sample => sample.name);
@@ -321,7 +336,7 @@ const App = () => {
       const vennScript = document.getElementById('d3-venn-script');
       if (vennScript && vennScript.parentNode) vennScript.parentNode.removeChild(vennScript);
     };
-  }, [isD3Loaded, isD3VennLoaded]); // ADDED isD3Loaded, isD3VennLoaded
+  }, [isD3Loaded, isD3VennLoaded]);
 
 
   // Generate Venn diagram data (sets and overlaps)
@@ -353,7 +368,8 @@ const App = () => {
       }
       labelMap.set(currentLabel, true); // Mark this unique label as used
 
-      const proteinAccessions = new Set(sample.analysisResults.map(r => r['Protein Accession']));
+      // Use the FDU's 'accession' field
+      const proteinAccessions = new Set(sample.analysisResults.map(r => r.accession));
       return { label: currentLabel, size: Number(proteinAccessions.size), proteins: proteinAccessions };
     });
 
@@ -480,7 +496,7 @@ const App = () => {
         window.d3?.select(vennDiagramRef.current)?.select('svg')?.remove();
         setTooltip(null); // Hide tooltip if diagram is cleared
     }
-  }, [vennOverlaps, isD3Loaded, isD3VennLoaded, tooltip, vennSets]); // ADDED vennSets
+  }, [vennOverlaps, isD3Loaded, isD3VennLoaded, tooltip, vennSets]);
 
   // Function to add a new sample input slot
   const addSampleInputSlot = () => {
@@ -543,11 +559,6 @@ const App = () => {
       reader.onload = (e) => {
         const text = e.target.result;
         
-        // Debugging: Log first few chars and their hex codes
-        const firstChars = text.substring(0, Math.min(text.length, 200)); // Log more characters
-        const firstCharsHex = Array.from(firstChars).map(c => c.charCodeAt(0).toString(16)).join(' ');
-        console.log(`parseCSV: First ${Math.min(text.length, 200)} chars of file (${file.name}): "${firstChars}" (Hex: ${firstCharsHex})`);
-
         const rows = text.split(/\r?\n/).filter(row => row.trim() !== ''); // Split by new line, handle both \r\n and \n, and filter out empty lines
         if (rows.length === 0) {
           console.warn(`parseCSV: File ${file.name} is empty after splitting into rows.`);
@@ -555,9 +566,6 @@ const App = () => {
           return;
         }
         
-        // Debugging: Log raw first row before splitting by delimiter
-        console.log(`parseCSV: Raw first row of ${file.name}: "${rows[0]}"`);
-
         // --- Delimiter Detection ---
         let detectedDelimiter = ','; // Default to comma
         if (rows[0].includes('\t')) {
@@ -573,12 +581,11 @@ const App = () => {
         } else if (rows[0].includes(';')) { // If no tabs, check for semicolons
             detectedDelimiter = ';';
         }
-        console.log(`parseCSV: Detected delimiter for ${file.name}: "${detectedDelimiter}"`);
+        // console.log(`parseCSV: Detected delimiter for ${file.name}: "${detectedDelimiter}"`); // Debugging line removed for production
         // --- End Delimiter Detection ---
 
 
         const headers = rows[0].split(detectedDelimiter).map(header => header.trim().replace(/"/g, ''));
-        console.log("parseCSV headers:", headers); // Debugging: Log parsed headers
         const data = [];
         for (let i = 1; i < rows.length; i++) {
           const values = rows[i].split(detectedDelimiter); // Use detected delimiter
@@ -594,9 +601,6 @@ const App = () => {
             rowObject[header] = rawValue.replace(/,/g, '.'); // Store all values as strings with dot decimals for consistent parsing later
           });
           data.push(rowObject);
-          if (i === 1) { // Log first data row
-            console.log("parseCSV first data row object:", rowObject); // Debugging: Log first data row object
-          }
         }
         resolve(data);
       };
@@ -605,13 +609,13 @@ const App = () => {
     });
   };
 
-  // --- Adapter Functions for Different Software Formats ---
-  // Each function takes raw parsed data (peptides, proteins) and transforms it into a common internal format.
-  // The common format should have: proteinAccession, description, totalPeptides, uniquePeptidesCount,
-  // isUniqueGroup, peptidesList, averageAbundance, proteinGroup, score (-10lgP for Peaks).
-
+  /**
+   * Adapts data from Peaks Studio format to the Unified Data Format (FDU).
+   * @param {Array<Object>} peptidesData - Raw peptides data from Peaks Studio.
+   * @param {Array<Object>} proteinsData - Raw proteins data from Peaks Studio.
+   * @returns {Object} - Object containing analysis results in FDU.
+   */
   const adaptPeaksStudioData = (peptidesData, proteinsData) => {
-    // Required headers for Peaks Studio
     const requiredPeptidesHeaders = ['Protein Accession', 'Protein Group', 'Unique', 'Peptide', 'Area IBIS_DDA_1', '-10lgP'];
     const requiredProteinsHeaders = ['Accession', 'Description'];
 
@@ -625,8 +629,6 @@ const App = () => {
       throw new Error(`Missing required headers in Proteins File for Peaks Studio: ${missingProteinsHeaders.join(', ')}`);
     }
 
-
-    // Step 1: Combine data
     const peptidesMap = new Map();
     peptidesData.forEach(p => {
       if (!peptidesMap.has(p['Protein Accession'])) peptidesMap.set(p['Protein Accession'], []);
@@ -647,7 +649,6 @@ const App = () => {
       };
     });
 
-    // Step 2: Data Normalization
     const totalArea = mergedData.reduce((sum, item) => sum + parseFloat(item['Area IBIS_DDA_1']), 0);
     const normFactor = totalArea > 0 ? 1000000 / totalArea : 1;
     
@@ -656,7 +657,6 @@ const App = () => {
       'Area IBIS_DDA_1': parseFloat(item['Area IBIS_DDA_1']) * normFactor,
     }));
 
-    // Step 3: Determine group uniqueness and unique peptides
     const proteinGroups = new Map();
     normalizedData.forEach(d => {
       const group = d['Protein Group'];
@@ -679,7 +679,6 @@ const App = () => {
       '# Unique Peptides': (uniquePeptides.get(d['Protein Accession']) || []).size,
     }));
 
-    // Step 4: Select the most reliable protein per group
     const uniqueProteinsMap = new Map();
     processedData.forEach(item => {
       const group = item['Protein Group'];
@@ -689,33 +688,35 @@ const App = () => {
     });
     const uniqueProteins = Array.from(uniqueProteinsMap.values());
     
-    // Step 5: Filter by pathogenic variants
     const pathogenicVariants = uniqueProteins.filter(p => 
       (p['Protein Accession'] && pathogenicPattern.test(p['Protein Accession'])) &&
       (p.Description && p.Description.includes('PATHOGENIC_VARIANT'))
     );
 
-    // Step 6: Calculate average abundance and prepare results
-    const finalResults = pathogenicVariants.map(variant => {
+    /**
+     * @type {ProteinData[]}
+     */
+    const finalResultsFDU = pathogenicVariants.map(variant => {
       const peptidesForVariant = processedData.filter(p => p['Protein Accession'] === variant['Protein Accession']);
       const totalPeptides = peptidesForVariant.length;
       const avgArea = totalPeptides > 0 ? peptidesForVariant.reduce((sum, p) => sum + parseFloat(p['Area IBIS_DDA_1']), 0) / totalPeptides : 0;
-      const proteinsInGroup = proteinGroups.get(variant['Protein Group']).size;
+      // const proteinsInGroup = proteinGroups.get(variant['Protein Group']).size; // This isn't directly needed for FDU output
 
       return {
-        'Protein Accession': variant['Protein Accession'],
-        'Description': variant.Description,
-        'Average Abundance': avgArea,
-        '# Total Peptides': totalPeptides,
-        '# Unique Peptides': variant['# Unique Peptides'],
-        '# Proteins in Group': proteinsInGroup,
-        'Is Unique Group?': variant['Is Protein Group Unique?'],
-        'Unique Peptides List': variant['Unique Peptides List'],
+        accession: variant['Protein Accession'],
+        description: variant.Description,
+        diseaseAssociation: extractDiseaseAssociation(variant.Description), // Extract association here
+        averageAbundance: avgArea,
+        totalPeptides: totalPeptides,
+        uniquePeptidesCount: variant['# Unique Peptides'],
+        isUniqueGroup: variant['Is Protein Group Unique?'],
+        uniquePeptidesList: variant['Unique Peptides List'],
+        rawScore: parseFloat(variant['-10lgP'])
       };
-    }).sort((a, b) => b['Average Abundance'] - a['Average Abundance']);
+    }).sort((a, b) => b.averageAbundance - a.averageAbundance); // Sort by FDU field
 
     return {
-      analysisResults: finalResults,
+      analysisResults: finalResultsFDU,
       totalPeptidesCount: peptidesData.length,
       totalProteinsCount: uniqueProteins.length,
       normalizationFactor: normFactor,
@@ -725,18 +726,20 @@ const App = () => {
   const adaptMaxQuantData = (peptidesRawData, proteinsRawData) => {
     console.warn("MaxQuant data adaptation is not fully implemented. Using dummy data.");
     return {
-        analysisResults: [],
+        analysisResults: [], // Should return array of ProteinData
         totalPeptidesCount: 0,
         totalProteinsCount: 0,
         normalizationFactor: 1,
     };
   };
 
+  /**
+   * Adapts data from Proteome Discoverer format to the Unified Data Format (FDU).
+   * @param {Array<Object>} peptidesData - Raw peptides data from Proteome Discoverer.
+   * @param {Array<Object>} proteinsData - Raw proteins data from Proteome Discoverer.
+   * @returns {Object} - Object containing analysis results in FDU.
+   */
   const adaptProteomeDiscovererData = (peptidesData, proteinsData) => {
-    console.log("--- adaptProteomeDiscovererData ---"); // Debugging
-    console.log("Peptides Data (first row):", peptidesData.length > 0 ? peptidesData[0] : "Empty or invalid"); // Debugging
-    console.log("Proteins Data (first row):", proteinsData.length > 0 ? proteinsData[0] : "Empty or invalid"); // Debugging
-
     // Check if data is empty first
     if (peptidesData.length === 0) {
       throw new Error("Peptides File for Proteome Discoverer is empty or contains no data rows.");
@@ -745,18 +748,14 @@ const App = () => {
       throw new Error("Proteins File for Proteome Discoverer is empty or contains no data rows.");
     }
 
-    // Helper to normalize headers for robust comparison (more aggressive)
     const normalizeHeader = (header) => header.replace(/\s/g, '').toLowerCase();
 
-    // Function to find the exact header name in actual data, robustly
     const findExactHeader = (actualHeadersList, requiredHeaderRaw) => {
         const normalizedRequired = normalizeHeader(requiredHeaderRaw);
-        console.log(`findExactHeader: Looking for normalizedRequired: "${normalizedRequired}" (Raw: "${requiredHeaderRaw}")`); // Debugging
         for (const actualHeader of actualHeadersList) {
             const normalizedActual = normalizeHeader(actualHeader);
-            console.log(`findExactHeader: Comparing actualHeader: "${actualHeader}" (normalized: "${normalizedActual}")`); // Debugging
             if (normalizedActual === normalizedRequired) {
-                return actualHeader; // Return the exact header string from the file
+                return actualHeader;
             }
         }
         return null;
@@ -765,17 +764,6 @@ const App = () => {
     const actualPeptidesHeadersList = Object.keys(peptidesData[0]);
     const actualProteinsHeadersList = Object.keys(proteinsData[0]);
     
-    console.log("Actual Peptides Headers List:", actualPeptidesHeadersList); // Debugging
-    console.log("Actual Proteins Headers List:", actualProteinsHeadersList); // Debugging
-    console.log("Actual Peptides Headers List (Normalized):", actualPeptidesHeadersList.map(normalizeHeader)); // Debugging
-    console.log("Actual Proteins Headers List (Normalized):", actualProteinsHeadersList.map(normalizeHeader)); // Debugging
-
-
-    // Required headers for Proteome Discoverer (using their raw names)
-    // const requiredPeptidesHeadersRaw = ['Sequence', 'Master Protein Accessions']; // Removed - Not used
-    // const requiredProteinsHeadersRaw = ['Accession', 'Description', '# Peptides', '# Unique Peptides', '# Protein Groups', 'Score Sequest HT: Sequest HT']; // Removed - Not used
-    const abundanceColumnRaw = 'Sum PEP Score'; // The name you identified for abundance
-
     // Find and validate exact header names
     const peptideSequenceHeader = findExactHeader(actualPeptidesHeadersList, 'Sequence');
     const peptideMasterAccessionsHeader = findExactHeader(actualPeptidesHeadersList, 'Master Protein Accessions');
@@ -785,31 +773,35 @@ const App = () => {
     const proteinUniquePeptidesHeader = findExactHeader(actualProteinsHeadersList, '# Unique Peptides');
     const proteinGroupsHeader = findExactHeader(actualProteinsHeadersList, '# Protein Groups');
     const proteinScoreHeader = findExactHeader(actualProteinsHeadersList, 'Score Sequest HT: Sequest HT');
-    const proteinAbundanceHeader = findExactHeader(actualProteinsHeadersList, abundanceColumnRaw);
+    const proteinAbundanceHeader = findExactHeader(actualProteinsHeadersList, 'Sum PEP Score'); // Assuming 'Sum PEP Score' is the abundance
 
+    // Check all required headers
+    const requiredHeaders = [
+      { type: 'peptide', header: peptideSequenceHeader, name: 'Sequence' },
+      { type: 'peptide', header: peptideMasterAccessionsHeader, name: 'Master Protein Accessions' },
+      { type: 'protein', header: proteinAccessionHeader, name: 'Accession' },
+      { type: 'protein', header: proteinDescriptionHeader, name: 'Description' },
+      { type: 'protein', header: proteinTotalPeptidesHeader, name: '# Peptides' },
+      { type: 'protein', header: proteinUniquePeptidesHeader, name: '# Unique Peptides' },
+      { type: 'protein', header: proteinGroupsHeader, name: '# Protein Groups' },
+      { type: 'protein', header: proteinScoreHeader, name: 'Score Sequest HT: Sequest HT' },
+      { type: 'protein', header: proteinAbundanceHeader, name: 'Sum PEP Score' }
+    ];
 
-    if (!peptideSequenceHeader) throw new Error(`Missing 'Sequence' header in Peptides File for Proteome Discoverer. Searched for normalized 'sequence'. Actual normalized headers: [${actualPeptidesHeadersList.map(normalizeHeader).join(', ')}]`);
-    if (!peptideMasterAccessionsHeader) throw new Error(`Missing 'Master Protein Accessions' header in Peptides File for Proteome Discoverer. Searched for normalized 'masterproteinaccessions'. Actual normalized headers: [${actualPeptidesHeadersList.map(normalizeHeader).join(', ')}]`);
-    if (!proteinAccessionHeader) throw new Error(`Missing 'Accession' header in Proteins File for Proteome Discoverer. Searched for normalized 'accession'. Actual normalized headers: [${actualProteinsHeadersList.map(normalizeHeader).join(', ')}]`);
-    if (!proteinDescriptionHeader) throw new Error(`Missing 'Description' header in Proteins File for Proteome Discoverer. Searched for normalized 'description'. Actual normalized headers: [${actualProteinsHeadersList.map(normalizeHeader).join(', ')}]`);
-    if (!proteinTotalPeptidesHeader) throw new Error(`Missing '# Peptides' header in Proteins File for Proteome Discoverer. Searched for normalized '#peptides'. Actual normalized headers: [${actualPeptidesHeadersList.map(normalizeHeader).join(', ')}]`);
-    if (!proteinUniquePeptidesHeader) throw new Error(`Missing '# Unique Peptides' header in Proteins File for Proteome Discoverer. Searched for normalized '#uniquepeptides'. Actual normalized headers: [${actualProteinsHeadersList.map(normalizeHeader).join(', ')}]`);
-    if (!proteinGroupsHeader) throw new Error(`Missing '# Protein Groups' header in Proteins File for Proteome Discoverer. Searched for normalized '#proteingroups'. Actual normalized headers: [${actualProteinsHeadersList.map(normalizeHeader).join(', ')}]`);
-    if (!proteinScoreHeader) throw new Error(`Missing 'Score Sequest HT: Sequest HT' header in Proteins File for Proteome Discoverer. Searched for normalized 'scoresequestht:sequestht'. Actual normalized headers: [${actualProteinsHeadersList.map(normalizeHeader).join(', ')}]`);
-    if (!proteinAbundanceHeader) throw new Error(`Missing '${abundanceColumnRaw}' header in Proteins File for Proteome Discoverer, needed for abundance calculation. Searched for normalized 'sumpepscore'. Actual normalized headers: [${actualProteinsHeadersList.map(normalizeHeader).join(', ')}]`);
+    requiredHeaders.forEach(req => {
+      if (!req.header) {
+        throw new Error(`Missing '${req.name}' header in ${req.type === 'peptide' ? 'Peptides' : 'Proteins'} File for Proteome Discoverer.`);
+      }
+    });
 
-
-    // Step 1: Combine data - Create a map for proteins for easy lookup
     const proteinsMap = new Map();
     proteinsData.forEach(p => proteinsMap.set(p[proteinAccessionHeader], p));
 
-    // Create a map for peptides by protein accession
     const peptidesByProteinMap = new Map();
     peptidesData.forEach(peptide => {
-        // Proteome Discoverer can have multiple accessions separated by semicolon in 'Master Protein Accessions'
         const proteinAccessions = peptide[peptideMasterAccessionsHeader].split(';').map(acc => acc.trim());
         proteinAccessions.forEach(acc => {
-            if (acc && proteinsMap.has(acc)) { // Only add if the protein exists in the proteinsData
+            if (acc && proteinsMap.has(acc)) {
                 if (!peptidesByProteinMap.has(acc)) {
                     peptidesByProteinMap.set(acc, []);
                 }
@@ -818,82 +810,63 @@ const App = () => {
         });
     });
 
-    // Process each unique protein
-    const uniqueProteinsProcessed = [];
+    /**
+     * @type {ProteinData[]}
+     */
+    const uniqueProteinsFDU = [];
     proteinsData.forEach(protein => {
-      const proteinAccession = protein[proteinAccessionHeader];
-      const proteinDescription = protein[proteinDescriptionHeader]; // Get description here
+      const accession = protein[proteinAccessionHeader];
+      const description = protein[proteinDescriptionHeader];
 
-      const associatedPeptides = peptidesByProteinMap.get(proteinAccession) || [];
-
-      // Total peptides from the proteins file (more reliable for total identified peptides)
+      const associatedPeptides = peptidesByProteinMap.get(accession) || [];
       const totalPeptides = parseInt(protein[proteinTotalPeptidesHeader]) || 0;
-
-      // Unique peptides count from the proteins file
       const uniquePeptidesCount = parseInt(protein[proteinUniquePeptidesHeader]) || 0;
-
-      // Collect unique peptide sequences from the associated peptides, if they are considered unique to this protein
+      
       const uniquePeptideSequences = new Set();
-      if (protein[proteinGroupsHeader] === '1') { // Assuming '1' means it's a unique protein group
+      if (protein[proteinGroupsHeader] === '1') {
         associatedPeptides.forEach(p => uniquePeptideSequences.add(p[peptideSequenceHeader]));
       }
       const uniquePeptidesList = Array.from(uniquePeptideSequences).join('; ');
 
-      // Determine if it's a unique group (based on '# Protein Groups' = 1)
       const isUniqueGroup = protein[proteinGroupsHeader] === '1';
-
-      // Get abundance from 'Sum PEP Score'
       const averageAbundance = parseFloat(protein[proteinAbundanceHeader]) || 0;
-      
-      // Protein Score (e.g., Sequest HT score for internal selection if needed)
-      const proteinScore = parseFloat(protein[proteinScoreHeader]) || 0;
+      const rawScore = parseFloat(protein[proteinScoreHeader]) || 0;
 
-      // Filter for pathogenic variants - REVISED LOGIC
-      // Check for pathogenic pattern in Accession AND specific keywords in Description
-      const isPathogenicByAccession = pathogenicPattern.test(proteinAccession);
-      const isPathogenicByDescription = proteinDescription && (
-          proteinDescription.includes('PATHOGENIC_VARIANT') ||
-          proteinDescription.includes('ClinicalSignificance:')
+      const isPathogenicByAccession = pathogenicPattern.test(accession);
+      const isPathogenicByDescription = description && (
+          description.includes('PATHOGENIC_VARIANT') ||
+          description.includes('ClinicalSignificance:')
       );
 
-      // --- ULTRA-SPECIFIC DEBUGGING LOGS ---
-      console.log(`Processing Protein: ${proteinAccession}`);
-      console.log(`  Description: "${proteinDescription}" (Hex: ${Array.from(proteinDescription || '').map(c => c.charCodeAt(0).toString(16)).join(' ')})`);
-      console.log(`  isPathogenicByAccession: ${isPathogenicByAccession}`);
-      console.log(`  isPathogenicByDescription: ${isPathogenicByDescription}`);
-      console.log(`  Combined Filter Result: ${isPathogenicByAccession && isPathogenicByDescription}`);
-      // --- END DEBUGGING LOGS ---
-
-
       if (isPathogenicByAccession && isPathogenicByDescription) {
-            uniqueProteinsProcessed.push({
-                'Protein Accession': proteinAccession,
-                'Description': proteinDescription,
-                'Average Abundance': averageAbundance,
-                '# Total Peptides': totalPeptides,
-                '# Unique Peptides': uniquePeptidesCount,
-                '# Proteins in Group': parseInt(protein[proteinGroupsHeader]) || 0,
-                'Is Unique Group?': isUniqueGroup,
-                'Unique Peptides List': uniquePeptidesList,
-                'Protein Score Sequest HT': proteinScore
+            uniqueProteinsFDU.push({
+                accession: accession,
+                description: description,
+                diseaseAssociation: extractDiseaseAssociation(description),
+                averageAbundance: averageAbundance,
+                totalPeptides: totalPeptides,
+                uniquePeptidesCount: uniquePeptidesCount,
+                isUniqueGroup: isUniqueGroup,
+                uniquePeptidesList: uniquePeptidesList,
+                rawScore: rawScore
             });
         }
     });
 
-    const finalResults = uniqueProteinsProcessed.sort((a, b) => b['Average Abundance'] - a['Average Abundanc e']);
+    const finalResults = uniqueProteinsFDU.sort((a, b) => b.averageAbundance - a.averageAbundance);
 
     return {
       analysisResults: finalResults,
       totalPeptidesCount: peptidesData.length,
       totalProteinsCount: proteinsData.length,
-      normalizationFactor: 1,
+      normalizationFactor: 1, // Proteome Discoverer usually provides absolute values, normalization might be external
     };
   };
 
   const adaptSpectronautData = (dataRaw) => {
     console.warn("Spectronaut data adaptation is not fully implemented. Using dummy data.");
     return {
-        analysisResults: [],
+        analysisResults: [], // Should return array of ProteinData
         totalPeptidesCount: 0,
         totalProteinsCount: 0,
         normalizationFactor: 1,
@@ -903,7 +876,7 @@ const App = () => {
   const adaptDiannData = (dataRaw) => {
     console.warn("DIA-NN data adaptation is not fully implemented. Using dummy data.");
     return {
-        analysisResults: [],
+        analysisResults: [], // Should return array of ProteinData
         totalPeptidesCount: 0,
         totalProteinsCount: 0,
         normalizationFactor: 1,
@@ -985,6 +958,7 @@ const App = () => {
         newProcessedSamples.push({
           id: sampleInput.id,
           name: sampleInput.name.trim(),
+          // analysisResults now contains FDU objects
           analysisResults: processedSampleData.analysisResults,
           totalPeptidesCount: processedSampleData.totalPeptidesCount,
           totalProteinsCount: processedSampleData.totalProteinsCount,
@@ -1104,21 +1078,21 @@ const App = () => {
     <div className="bg-gray-100 min-h-screen p-4 sm:p-8 font-sans">
       <div className="max-w-4xl mx-auto bg-white p-6 rounded-3xl shadow-lg">
         <h1 className="text-3xl sm:text-4xl font-extrabold text-blue-700 mb-2">Multi-Sample Biomarker Analysis</h1>
-        <p className="text-lg text-gray-600 mb-8">Load and compare the abundance of pathogenic proteins across different samples.</p>
+        <p className="text-lg text-gray-600 mb-8">Carga y compara la abundancia de proteínas patogénicas entre diferentes muestras.</p>
 
         {/* Section to manage sample slots */}
         <div className="mb-8 p-6 bg-blue-50 rounded-3xl shadow-inner">
-          <h2 className="text-xl font-bold text-blue-800 mb-4">Manage Samples</h2>
+          <h2 className="text-xl font-bold text-blue-800 mb-4">Gestionar Muestras</h2>
           {sampleInputs.map((sampleSlot, index) => (
             <div key={sampleSlot.id} className="mb-6 p-4 bg-white rounded-2xl border border-gray-200 shadow-sm">
               <div className="flex justify-between items-center mb-3">
-                <label htmlFor={`sampleName-${sampleSlot.id}`} className="block text-base font-medium text-gray-700">Sample {index + 1}</label>
+                <label htmlFor={`sampleName-${sampleSlot.id}`} className="block text-base font-medium text-gray-700">Muestra {index + 1}</label>
                 {sampleInputs.length > 1 && (
                   <button
                     onClick={() => removeSampleInputSlot(sampleSlot.id)}
                     className="text-red-600 hover:text-red-800 text-sm font-semibold"
                   >
-                    Remove
+                    Eliminar
                   </button>
                 )}
               </div>
@@ -1127,12 +1101,12 @@ const App = () => {
                 id={`sampleName-${sampleSlot.id}`}
                 value={sampleSlot.name}
                 onChange={(e) => handleSampleNameChange(sampleSlot.id, e.target.value)}
-                placeholder="Sample Name (e.g., Control, Treated)"
+                placeholder="Nombre de la muestra (ej: Control, Tratado)"
                 className="w-full p-2 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 mb-4"
               />
               {/* New: Source Software Selector */}
               <div className="mb-4">
-                <label htmlFor={`sourceSoftware-${sampleSlot.id}`} className="block text-sm font-medium text-gray-700 mb-1">Source Software:</label>
+                <label htmlFor={`sourceSoftware-${sampleSlot.id}`} className="block text-sm font-medium text-gray-700 mb-1">Software de Origen:</label>
                 <select
                   id={`sourceSoftware-${sampleSlot.id}`}
                   value={sampleSlot.sourceSoftware}
@@ -1151,8 +1125,8 @@ const App = () => {
                 <div className="p-2 bg-gray-50 rounded-xl border border-gray-100">
                   <label className="block text-sm font-medium text-gray-700 mb-1">
                     {sampleSlot.sourceSoftware === 'Spectronaut' || sampleSlot.sourceSoftware === 'DIA-NN' ? 
-                      'Data File (e.g., PeptideGroups.tsv / proteins.tsv)' : 
-                      'Peptides File (e.g., protein-peptides.csv / PeptideGroups.txt)'}
+                      'Archivo de Datos (ej: PeptideGroups.tsv / proteins.tsv)' : 
+                      (sampleSlot.sourceSoftware === 'Peaks Studio' ? 'Archivo de Péptidos (ej: protein-peptides.csv / .txt / .tsv)' : 'Archivo de Péptidos (ej: protein-peptides.csv / PeptideGroups.txt)')}
                   </label>
                   <input 
                     type="file" 
@@ -1164,7 +1138,9 @@ const App = () => {
                 {/* Proteins file is generally needed for Peaks, MaxQuant, PD. Spectronaut/DIA-NN often consolidate. */}
                 {(sampleSlot.sourceSoftware === 'Peaks Studio' || sampleSlot.sourceSoftware === 'MaxQuant' || sampleSlot.sourceSoftware === 'Proteome Discoverer') && (
                   <div className="p-2 bg-gray-50 rounded-xl border border-gray-100">
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Proteins File (e.g., `proteins.csv` / `Proteins.txt`)</label>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      {sampleSlot.sourceSoftware === 'Peaks Studio' ? 'Archivo de Proteínas (ej: `proteins.csv` / `.txt` / `.tsv`)' : 'Archivo de Proteínas (ej: `proteins.csv` / `Proteins.txt`)'}
+                    </label>
                     <input 
                       type="file" 
                       accept=".csv,.txt,.tsv"
@@ -1180,11 +1156,10 @@ const App = () => {
             onClick={addSampleInputSlot}
             className="w-full py-2 px-4 bg-gray-200 text-gray-700 font-semibold rounded-2xl hover:bg-gray-300 transition-colors mb-4"
           >
-            + Add Sample Slot
+            + Añadir Ranura de Muestra
           </button>
           <button
             onClick={processAllSamples}
-            // Disable if loading, or any sample slot has no name, or is missing required files for its selected software
             disabled={loading || !isFormValid()}
             className="w-full py-3 px-6 bg-blue-600 text-white font-bold rounded-2xl shadow-md hover:bg-blue-700 transition-colors disabled:bg-blue-300 disabled:cursor-not-allowed flex items-center justify-center space-x-2"
           >
@@ -1194,7 +1169,7 @@ const App = () => {
                 <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
               </svg>
             )}
-            <span>{loading ? "Processing Samples..." : "Process All Samples"}</span>
+            <span>{loading ? "Procesando Muestras..." : "Procesar Todas las Muestras"}</span>
           </button>
         </div>
 
@@ -1209,7 +1184,7 @@ const App = () => {
         {/* Sample Selector for Comparison */}
         {processedSamples.length > 0 && (
           <div className="mb-8 p-6 bg-gray-50 rounded-3xl shadow-inner">
-            <h2 className="text-xl font-bold text-gray-800 mb-4">Select Samples for Comparison</h2>
+            <h2 className="text-xl font-bold text-gray-800 mb-4">Seleccionar Muestras para Comparación</h2>
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
               {processedSamples.map(sample => (
                 <label key={sample.id} className="inline-flex items-center p-2 bg-white rounded-xl border border-gray-200 shadow-sm cursor-pointer hover:bg-gray-100 transition-colors">
@@ -1224,7 +1199,7 @@ const App = () => {
               ))}
             </div>
             {selectedProcessedSampleIds.length > 0 && (
-              <p className="text-sm text-gray-600 mt-4">Selected samples: {selectedProcessedSampleIds.length}</p>
+              <p className="text-sm text-gray-600 mt-4">Muestras seleccionadas: {selectedProcessedSampleIds.length}</p>
             )}
           </div>
         )}
