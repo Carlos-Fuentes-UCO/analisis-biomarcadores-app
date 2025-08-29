@@ -243,7 +243,11 @@ const App = () => {
 
   // Handler for changing the source software for a specific slot
   const handleSourceSoftwareChange = (id, newSoftware) => {
-    setSampleInputs(sampleInputs.map(slot => ({ ...slot, id, sourceSoftware: newSoftware, files: { peptides: null, proteins: null } })));
+    setSampleInputs(sampleInputs.map(slot =>
+      slot.id === id
+        ? { ...slot, sourceSoftware: newSoftware, files: { peptides: null, proteins: null } }
+        : slot
+    ));
     // Reset files when software changes to avoid incompatible file processing
   };
 
@@ -490,9 +494,8 @@ const App = () => {
 
 
     // Required headers for Proteome Discoverer (using their raw names)
-    // Removed 'requiredPeptidesHeadersRaw' and 'requiredProteinsHeadersRaw' as they were declared but never used.
-    // const requiredPeptidesHeadersRaw = ['Sequence', 'Master Protein Accessions'];
-    // const requiredProteinsHeadersRaw = ['Accession', 'Description', '# Peptides', '# Unique Peptides', '# Protein Groups', 'Score Sequest HT: Sequest HT'];
+    // const requiredPeptidesHeadersRaw = ['Sequence', 'Master Protein Accessions']; // Removed - Not used
+    // const requiredProteinsHeadersRaw = ['Accession', 'Description', '# Peptides', '# Unique Peptides', '# Protein Groups', 'Score Sequest HT: Sequest HT']; // Removed - Not used
     const abundanceColumnRaw = 'Sum PEP Score'; // The name you identified for abundance
 
     // Find and validate exact header names
