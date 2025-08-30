@@ -616,7 +616,7 @@ const App = () => {
    * @returns {Object} - Object containing analysis results in FDU.
    */
   const adaptPeaksStudioData = (peptidesData, proteinsData) => {
-    const requiredPeptidesHeaders = ['Protein Accession', 'Protein Group', 'Unique', 'Peptide', 'Area *', '-10lgP'];
+    const requiredPeptidesHeaders = ['Protein Accession', 'Protein Group', 'Unique', 'Peptide', 'Area ', '-10lgP'];
     const requiredProteinsHeaders = ['Accession', 'Description'];
 
     const missingPeptidesHeaders = requiredPeptidesHeaders.filter(h => !peptidesData.length || !Object.keys(peptidesData[0]).includes(h));
@@ -644,17 +644,17 @@ const App = () => {
         ...peptide,
         Description: proteinInfo ? proteinInfo.Description : '',
         Accession: proteinInfo ? proteinInfo.Accession : '',
-        'Area *': parseFloat(peptide['Area *']) || 0,
+        'Area ': parseFloat(peptide['Area ']) || 0,
         '-10lgP': parseFloat(peptide['-10lgP']) || 0,
       };
     });
 
-    const totalArea = mergedData.reduce((sum, item) => sum + parseFloat(item['Area *']), 0);
+    const totalArea = mergedData.reduce((sum, item) => sum + parseFloat(item['Area ']), 0);
     const normFactor = totalArea > 0 ? 1000000 / totalArea : 1;
     
     const normalizedData = mergedData.map(item => ({
       ...item,
-      'Area *': parseFloat(item['Area *']) * normFactor,
+      'Area ': parseFloat(item['Area ']) * normFactor,
     }));
 
     const proteinGroups = new Map();
@@ -699,7 +699,7 @@ const App = () => {
     const finalResultsFDU = pathogenicVariants.map(variant => {
       const peptidesForVariant = processedData.filter(p => p['Protein Accession'] === variant['Protein Accession']);
       const totalPeptides = peptidesForVariant.length;
-      const avgArea = totalPeptides > 0 ? peptidesForVariant.reduce((sum, p) => sum + parseFloat(p['Area *']), 0) / totalPeptides : 0;
+      const avgArea = totalPeptides > 0 ? peptidesForVariant.reduce((sum, p) => sum + parseFloat(p['Area ']), 0) / totalPeptides : 0;
       // const proteinsInGroup = proteinGroups.get(variant['Protein Group']).size; // This isn't directly needed for FDU output
 
       return {
