@@ -829,7 +829,8 @@ const App = () => {
       const uniquePeptidesList = Array.from(uniquePeptideSequences).join('; ');
 
       const isUniqueGroup = protein[proteinGroupsHeader] === '1';
-      const averageAbundance = parseFloat(protein[proteinAbundanceHeader]) || 0;
+      const areaKey = Object.keys(protein).find(key => key.startsWith('Area '));
+    const averageAbundance = areaKey ? parseFloat(protein[areaKey] || 0) : 0;
       const rawScore = parseFloat(protein[proteinScoreHeader]) || 0;
 
       const isPathogenicByAccession = pathogenicPattern.test(accession);
