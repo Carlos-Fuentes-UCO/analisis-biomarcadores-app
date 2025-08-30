@@ -616,7 +616,7 @@ const App = () => {
    * @returns {Object} - Object containing analysis results in FDU.
    */
   const adaptPeaksStudioData = (peptidesData, proteinsData) => {
-    const requiredPeptidesHeaders = ['Protein Accession', 'Protein Group', 'Unique', 'Peptide', 'Area IBIS_DDA_1', '-10lgP'];
+    const requiredPeptidesHeaders = ['Protein Accession', 'Protein Group', 'Unique', 'Peptide', 'Area *', '-10lgP'];
     const requiredProteinsHeaders = ['Accession', 'Description'];
 
     const missingPeptidesHeaders = requiredPeptidesHeaders.filter(h => !peptidesData.length || !Object.keys(peptidesData[0]).includes(h));
