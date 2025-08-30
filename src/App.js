@@ -1,4 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
+import { initializeApp } from 'firebase/app';
+import { getFirestore, doc, setDoc, onSnapshot, collection, query, where } from 'firebase/firestore';
 
 // Define regular expressions patterns for pathogenic variants
 const pathogenicPattern = /(-VAR_)|(-[A-Z]\d+[A-Z])/;
@@ -16,1391 +19,528 @@ const pathogenicPattern = /(-VAR_)|(-[A-Z]\d+[A-Z])/;
  * @property {number} [rawScore] - Puntuación bruta del software de origen (opcional, ej: -10lgP de Peaks).
  */
 
-// Main application component
 const App = () => {
-  // State to manage multiple file input sets
-  const [sampleInputs, setSampleInputs] = useState([{ id: 1, name: '', sourceSoftware: 'Peaks Studio', files: { peptides: null, proteins: null } }]);
-  const [nextSampleInputId, setNextSampleInputId] = useState(2); // For unique slot IDs
-
-  // State to store the results of already processed samples
-  const [processedSamples, setProcessedSamples] = useState([]);
-  // State for the IDs of samples selected for the comparative table and visualizations
-  const [selectedProcessedSampleIds, setSelectedProcessedSampleIds] = useState([]);
-  // State for the currently selected protein for the comparative bar chart
-  const [selectedProteinForChart, setSelectedProteinForChart] = useState('');
-
-  // New state for Venn Diagram sample selection
-  const [selectedVennSampleIds, setSelectedVennSampleIds] = useState([]);
-  const vennDiagramRef = useRef(null);
-  const [isD3Loaded, setIsD3Loaded] = useState(false);
-  const [isD3VennLoaded, setIsD3VennLoaded] = useState(false);
-
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState(null);
-  
-  // State to indicate if export is in progress
-  const [isExporting, setIsExporting] = useState(false);
-
-  // State for Chart.js library loading
-  const [isChartLibraryLoaded, setIsChartLibraryLoaded] = useState(false);
-  // Ref for the comparative bar chart canvas and Chart.js instance
-  const comparativeChartCanvasRef = useRef(null);
-  const comparativeChartInstance = useRef(null);
-
-  // State for Venn diagram tooltip
-  const [tooltip, setTooltip] = useState(null); // { x, y, content, idList }
-  // State for copy confirmation message
-  const [copyMessage, setCopyMessage] = useState(null); // { message, visible, isError }
-
-
-  // Get selected samples for the comparative table and visualizations
-  const samplesForComparison = processedSamples.filter(sample =>
-    selectedProcessedSampleIds.includes(sample.id)
-  );
-
-  // Helper function to extract disease association
-  const extractDiseaseAssociation = (description) => {
-    let association = '';
-    const associationMatch = description.match(/Association:([^|]+)/);
-    const clinicalSigMatch = description.match(/ClinicalSignificance:([^|]+)/);
-
-    if (associationMatch && associationMatch[1]) {
-      association = associationMatch[1].trim();
-    } else if (clinicalSigMatch && clinicalSigMatch[1]) {
-      association = clinicalSigMatch[1].trim();
-    }
-    return association || 'N/A';
-  };
-
-  // Generate data for the comparative table, heatmap, and bar chart
-  // This function now expects processed samples to already contain data in the FDU.
-  const getComparativeTableAndVisualizationData = () => {
-    if (samplesForComparison.length === 0) return { headers: [], tableRows: [], visualizationData: [], uniqueProteinAccessions: [] };
-
-    const uniqueProteinAccessions = new Set();
-    const proteinDetailsMap = new Map(); // Stores FDU protein data
-    let maxAbundance = 0;
-
-    samplesForComparison.forEach(sample => {
-      sample.analysisResults.forEach(result => { // result is now a ProteinData object (FDU)
-        uniqueProteinAccessions.add(result.accession);
-        if (!proteinDetailsMap.has(result.accession)) {
-          proteinDetailsMap.set(result.accession, {
-            description: result.description,
-            totalPeptides: result.totalPeptides,
-            uniquePeptidesCount: result.uniquePeptidesCount,
-            isUniqueGroup: result.isUniqueGroup,
-            uniquePeptidesList: result.uniquePeptidesList,
-            diseaseAssociation: result.diseaseAssociation // Already extracted in adapter
-          });
-        }
-        if (result.averageAbundance > maxAbundance) {
-          maxAbundance = result.averageAbundance;
-        }
-      });
-    });
-
-    const headers = [
-      "Protein Accession",
-      "Description",
-      "Disease Association / Clinical Significance",
-      "# Total Peptides",
-      "Unique Peptides",
-      "Is Unique Group?",
-      "Unique Peptides List",
-      ...samplesForComparison.map(sample => `Average Abundance (${sample.name})`)
-    ];
-
-    const tableRows = Array.from(uniqueProteinAccessions).map(accession => {
-      const details = proteinDetailsMap.get(accession);
-      const rowData = [
-        accession,
-        details.description,
-        details.diseaseAssociation,
-        details.totalPeptides,
-        details.uniquePeptidesCount,
-        details.isUniqueGroup ? 'Yes' : 'No',
-        details.uniquePeptidesList
-      ];
-      samplesForComparison.forEach(sample => {
-        const result = sample.analysisResults.find(res => res.accession === accession); // Use FDU field
-        rowData.push(result ? result.averageAbundance.toFixed(2) : 'N/A'); // Use FDU field
-      });
-      return rowData;
-    });
-
-    const visualizationData = Array.from(uniqueProteinAccessions).map(accession => {
-        const abundancesBySample = {};
-        samplesForComparison.forEach(sample => {
-            const result = sample.analysisResults.find(res => res.accession === accession); // Use FDU field
-            abundancesBySample[sample.name] = result ? parseFloat(result.averageAbundance.toFixed(2)) : 0; // Use FDU field
-        });
-        return {
-            proteinAccession: accession, // Still using this for chart selection
-            abundancesBySample: abundancesBySample
-        };
-    });
-
-    return { headers, tableRows, visualizationData, uniqueProteinAccessions: Array.from(uniqueProteinAccessions), maxAbundance };
-  };
-
-  const { headers: comparativeHeaders, tableRows: comparativeTableRows, visualizationData, uniqueProteinAccessions: allUniqueProteins, maxAbundance } = getComparativeTableAndVisualizationData();
-
-
-  // useEffect to dynamically load Chart.js and verify its availability
-  useEffect(() => {
-    if (window.Chart) {
-      setIsChartLibraryLoaded(true);
-    } else {
-      const chartjsUrl = 'https://cdnjs.cloudflare.com/ajax/libs/Chart.js/3.7.0/chart.min.js';
-      const script = document.createElement('script');
-      script.src = chartjsUrl;
-      script.id = 'chartjs-script';
-      script.async = true;
-      script.onload = () => {
-        setIsChartLibraryLoaded(true);
-      };
-      script.onerror = () => {
-        setError("Error loading Chart.js library. The chart will not be available.");
-      };
-      document.body.appendChild(script);
-
-      return () => {
-        const chartScript = document.getElementById('chartjs-script');
-        if (chartScript && chartScript.parentNode) chartScript.parentNode.removeChild(chartScript);
-      };
-    }
-  }, []); 
-
-  // useEffect to render/update the comparative bar chart
-  useEffect(() => {
-    if (comparativeChartCanvasRef.current && selectedProteinForChart && isChartLibraryLoaded && samplesForComparison.length > 0) {
-      const proteinData = samplesForComparison.map(sample => {
-        // Now using FDU fields
-        const result = sample.analysisResults.find(res => res.accession === selectedProteinForChart);
-        return result ? parseFloat(result.averageAbundance.toFixed(2)) : 0;
-      });
-
-      const labels = samplesForComparison.map(sample => sample.name);
-
-      if (comparativeChartInstance.current) {
-        comparativeChartInstance.current.destroy();
-      }
-
-      const ctx = comparativeChartCanvasRef.current.getContext('2d');
-      comparativeChartInstance.current = new window.Chart(ctx, {
-        type: 'bar',
-        data: {
-          labels: labels,
-          datasets: [{
-            label: `Average Abundance for ${selectedProteinForChart}`,
-            data: proteinData,
-            backgroundColor: 'rgba(59, 130, 246, 0.7)',
-            borderColor: 'rgba(59, 130, 246, 1)',
-            borderWidth: 1,
-          }]
-        },
-        options: {
-          responsive: true,
-          maintainAspectRatio: false,
-          plugins: {
-            legend: {
-              display: true,
-              position: 'top',
-            },
-            title: {
-              display: true,
-              text: `Comparative Abundance for ${selectedProteinForChart}`,
-            }
-          },
-          scales: {
-            x: {
-              title: {
-                display: true,
-                text: 'Sample',
-              }
-            },
-            y: {
-              beginAtZero: true,
-              title: {
-                display: true,
-                text: 'Average Abundance (Normalized)',
-              }
-            }
-          }
-        }
-      });
-    } else {
-      if (comparativeChartInstance.current) {
-        comparativeChartInstance.current.destroy();
-        comparativeChartInstance.current = null;
-      }
-    }
-
-    return () => {
-      if (comparativeChartInstance.current) {
-        comparativeChartInstance.current.destroy();
-        comparativeChartInstance.current = null;
-      }
-      if (comparativeChartInstance.current) {
-        comparativeChartInstance.current.destroy();
-        comparativeChartInstance.current = null;
-      }
-    };
-  }, [selectedProteinForChart, samplesForComparison, isChartLibraryLoaded]);
-
-  // Load D3 and D3-Venn libraries
-  useEffect(() => {
-    const loadScript = (id, src, globalObjectName) => {
-      return new Promise((resolve, reject) => {
-        // Check if global object already exists
-        if (window[globalObjectName]) {
-          console.log(`${globalObjectName} already loaded.`);
-          resolve(true);
-          return;
-        }
-
-        let script = document.getElementById(id);
-        if (script) {
-          console.log(`Script tag ${id} already exists, waiting for ${globalObjectName}.`);
-          // If script exists but global object isn't there, poll for it
-          const checkGlobal = setInterval(() => {
-            if (window[globalObjectName]) {
-              clearInterval(checkGlobal);
-              resolve(true);
-            }
-          }, 50); // Check every 50ms
-          return;
-        }
-
-        script = document.createElement('script');
-        script.src = src;
-        script.id = id;
-        script.async = true;
-        script.onload = () => {
-          console.log(`Script ${id} loaded, checking for ${globalObjectName}...`);
-          // After script loads, poll for the global object to be defined
-          const checkGlobal = setInterval(() => {
-            if (window[globalObjectName]) {
-              clearInterval(checkGlobal);
-              resolve(true);
-            }
-          }, 50); // Check every 50ms
-        };
-        script.onerror = () => reject(new Error(`Failed to load script: ${src}`));
-        document.body.appendChild(script);
-      });
-    };
-
-    const loadAllVennLibraries = async () => {
-      try {
-        setError(null); // Clear any previous errors before trying to load
-
-        // Load D3 first, wait for window.d3 to be available
-        if (!window.d3) { // Only attempt to load if window.d3 is not yet available
-          console.log("Attempting to load D3...");
-          await loadScript('d3-script', 'https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js', 'd3');
-          setIsD3Loaded(true);
-          console.log("D3 loaded successfully.");
-        } else if (!isD3Loaded) { // D3 is in window, but state isn't updated
-          setIsD3Loaded(true);
-          console.log("D3 already available, state updated.");
-        }
-
-        // Load D3-Venn only if D3 is loaded and D3-Venn isn't already there
-        // Use window.d3 to confirm D3 is available before trying to load D3-Venn
-        if (window.d3 && !window.venn) { // Only attempt to load if window.venn is not yet available
-          console.log("Attempting to load D3-Venn...");
-          // Switched CDN for d3-venn to cdnjs
-          await loadScript('d3-venn-script', 'https://cdnjs.cloudflare.com/ajax/libs/venn.js/0.2.14/venn.min.js', 'venn');
-          setIsD3VennLoaded(true);
-          console.log("D3-Venn loaded successfully.");
-        } else if (window.d3 && window.venn && !isD3VennLoaded) { // D3 and Venn are in window, but state isn't updated
-          setIsD3VennLoaded(true);
-          console.log("D3-Venn already available, state updated.");
-        }
-
-      } catch (err) {
-        console.error("Error loading Venn libraries:", err);
-        setError(`Error cargando librerías para el diagrama de Venn: ${err.message}. Asegúrate de que tienes conexión a internet.`);
-      }
-    };
-
-    loadAllVennLibraries(); // Execute the async loading function
-
-    return () => {
-      // Cleanup: remove the scripts if the component unmounts
-      // Only remove if they were actually added by this component and are not needed elsewhere
-      const d3Script = document.getElementById('d3-script');
-      if (d3Script && d3Script.parentNode) d3Script.parentNode.removeChild(d3Script);
-      const vennScript = document.getElementById('d3-venn-script');
-      if (vennScript && vennScript.parentNode) vennScript.parentNode.removeChild(vennScript);
-    };
-  }, [isD3Loaded, isD3VennLoaded]);
-
-
-  // Generate Venn diagram data (sets and overlaps)
-  const generateVennDiagramData = () => {
-    if (selectedVennSampleIds.length < 2 || selectedVennSampleIds.length > 3) {
-      // Clean up SVG if fewer than 2 or more than 3 samples are selected
-      window.d3?.select(vennDiagramRef.current)?.select('svg')?.remove();
-      return { sets: [], overlaps: [] };
-    }
-
-    const selectedVennSamples = processedSamples.filter(sample =>
-      selectedVennSampleIds.includes(sample.id)
-    );
-
-    // Ensure labels are unique by appending ID if names are duplicated
-    const labelMap = new Map();
-    const proteinSetsIntermediate = selectedVennSamples.map(sample => {
-      let baseLabel = sample.name.trim();
-      if (!baseLabel) {
-        baseLabel = `Sample ${sample.id}`; // Fallback if name is empty
-      }
-
-      let currentLabel = baseLabel;
-      let count = 1;
-      // Ensure unique label for Venn diagram (d3-venn expects unique set labels)
-      while (labelMap.has(currentLabel)) {
-        count++;
-        currentLabel = `${baseLabel} (${count})`;
-      }
-      labelMap.set(currentLabel, true); // Mark this unique label as used
-
-      // Use the FDU's 'accession' field
-      const proteinAccessions = new Set(sample.analysisResults.map(r => r.accession));
-      return { label: currentLabel, size: Number(proteinAccessions.size), proteins: proteinAccessions };
-    });
-
-    const allVennData = [];
-
-    // Add individual sets to allVennData in d3-venn format { sets: ["label"], size: N, proteins: Set }
-    proteinSetsIntermediate.forEach(pSet => {
-      allVennData.push({ sets: [pSet.label], size: pSet.size, proteins: pSet.proteins });
-    });
-
-    // Calculate pairwise overlaps
-    for (let i = 0; i < proteinSetsIntermediate.length; i++) {
-      for (let j = i + 1; j < proteinSetsIntermediate.length; j++) {
-        const set1 = proteinSetsIntermediate[i];
-        const set2 = proteinSetsIntermediate[j];
-        const intersection = new Set([...set1.proteins].filter(x => set2.proteins.has(x)));
-        allVennData.push({ sets: [set1.label, set2.label], size: Number(intersection.size), proteins: intersection });
-      }
-    }
-
-    // Calculate triplet overlap if 3 samples are selected
-    if (proteinSetsIntermediate.length === 3) {
-      const set1 = proteinSetsIntermediate[0];
-      const set2 = proteinSetsIntermediate[1];
-      const set3 = proteinSetsIntermediate[2];
-
-      const intersection12 = new Set([...set1.proteins].filter(x => set2.proteins.has(x)));
-      const intersection123 = new Set([...intersection12].filter(x => set3.proteins.has(x)));
-      
-      allVennData.push({ sets: [set1.label, set2.label, set3.label], size: Number(intersection123.size), proteins: intersection123 });
-    }
-
-    // Filter to ensure all objects have valid 'sets' and 'size' properties, and 'proteins' is a Set
-    const finalVennData = allVennData.filter(d =>
-      d && Array.isArray(d.sets) && d.sets.every(s => typeof s === 'string' && s.length > 0) &&
-      typeof d.size === 'number' && !isNaN(d.size) &&
-      d.proteins instanceof Set
-    );
-
-    return { sets: proteinSetsIntermediate, overlaps: finalVennData };
-  };
-
-  const { sets: vennSets, overlaps: vennOverlaps } = generateVennDiagramData();
-
-  // Render Venn Diagram
-  useEffect(() => {
-    // Only attempt to render if the necessary libraries are loaded, the ref exists,
-    // and there's valid data for the Venn diagram.
-    if (vennDiagramRef.current && vennOverlaps.length > 0 && isD3Loaded && isD3VennLoaded && window.d3 && window.venn) {
-      console.log("Rendering Venn Diagram. vennSets (for debug, not direct use):", vennSets);
-      console.log("Rendering Venn Diagram. vennOverlaps (final data for datum):", vennOverlaps); // Debug log
-
-      // Clear previous SVG content to prevent multiple diagrams stacking
-      window.d3.select(vennDiagramRef.current).select('svg').remove();
-      
-      const chart = window.venn.VennDiagram()
-                                  .width(600)
-                                  .height(400)
-                                  .fontSize("14px")
-                                  .padding(15);
-
-      const svg = window.d3.select(vennDiagramRef.current)
-        .append("svg")
-        .attr("width", 600)
-        .attr("height", 400);
-
-      // Pass the combined and filtered data to d3-venn
-      svg.datum(vennOverlaps).call(chart);
-
-      // Customize text and circles for better readability and aesthetics
-      svg.selectAll(".venn-circle path")
-        .style("fill-opacity", 0.6)
-        .style("stroke-width", 2)
-        .style("stroke-opacity", 0.8)
-        .style("stroke", "#fff"); // White stroke for better separation
-
-      svg.selectAll(".venn-set-label")
-        .style("fill", "#333")
-        .style("font-weight", "bold");
-
-      svg.selectAll(".venn-intersection-label")
-        .style("fill", "#666");
-
-      // Add interactive events for Venn areas
-      svg.selectAll("g.venn-area")
-        .on("mouseover", function(event, d) {
-            if (!d.proteins) return; // Guard against missing protein data
-            const proteinsArray = Array.from(d.proteins);
-            const sampleIds = proteinsArray.slice(0, 5).join(', ') + (proteinsArray.length > 5 ? '...' : '');
-            const content = `<span class="font-bold">Count:</span> ${d.size}<br/><span class="font-bold">IDs (muestra):</span> ${sampleIds}`;
-            setTooltip({
-                x: event.pageX + 10,
-                y: event.pageY - 20,
-                content: content,
-                idList: proteinsArray // Store full list for copying
-            });
-            window.d3.select(this).select("path").style("fill-opacity", 0.75); // Highlight
-        })
-        .on("mousemove", function(event) {
-            if (tooltip) { // Only update position if tooltip is already active
-                setTooltip(prev => prev ? { ...prev, x: event.pageX + 10, y: event.pageY - 20 } : null);
-            }
-        })
-        .on("mouseout", function() {
-            setTooltip(null);
-            window.d3.select(this).select("path").style("fill-opacity", 0.6); // De-highlight
-        })
-        .on("click", function(event, d) {
-            if (!d.proteins) return; // Guard against missing protein data
-            const proteinsArray = Array.from(d.proteins);
-            const idString = proteinsArray.join('\n');
-            navigator.clipboard.writeText(idString).then(() => {
-                setCopyMessage({ message: `¡Copiados ${proteinsArray.length} IDs de proteínas al portapapeles!`, visible: true });
-                setTimeout(() => setCopyMessage(null), 3000); // Hide after 3 seconds
-            }).catch(err => {
-                console.error('Error copying to clipboard:', err);
-                setCopyMessage({ message: 'Error al copiar IDs al portapapeles.', visible: true, isError: true });
-                setTimeout(() => setCopyMessage(null), 3000);
-            });
-        });
-
-    } else if (vennDiagramRef.current) {
-        // Clear SVG if conditions for rendering are not met (e.g., no data, or less than 2/more than 3 selected samples)
-        window.d3?.select(vennDiagramRef.current)?.select('svg')?.remove();
-        setTooltip(null); // Hide tooltip if diagram is cleared
-    }
-  }, [vennOverlaps, isD3Loaded, isD3VennLoaded, tooltip, vennSets]);
-
-  // Function to add a new sample input slot
-  const addSampleInputSlot = () => {
-    setSampleInputs([...sampleInputs, { id: nextSampleInputId, name: '', sourceSoftware: 'Peaks Studio', files: { peptides: null, proteins: null } }]);
-    setNextSampleInputId(nextSampleInputId + 1);
-  };
-
-  // Function to remove a sample input slot
-  const removeSampleInputSlot = (id) => {
-    setSampleInputs(sampleInputs.filter(slot => slot.id !== id));
-    setProcessedSamples(prev => prev.filter(sample => sample.id !== id)); // Also remove from processed
-    setSelectedProcessedSampleIds(prev => prev.filter(sampleId => sampleId !== id));
-    setSelectedVennSampleIds(prev => prev.filter(sampleId => sampleId !== id)); // Also remove from Venn selection
-  };
-
-  // Handler for changing the name for a specific slot
-  const handleSampleNameChange = (id, newName) => {
-    setSampleInputs(sampleInputs.map(slot => slot.id === id ? { ...slot, name: newName } : slot));
-    setProcessedSamples(prev => prev.map(sample => sample.id === id ? { ...sample, name: newName } : sample)); // Update name in processed too
-  };
-
-  // Handler for changing the source software for a specific slot
-  const handleSourceSoftwareChange = (id, newSoftware) => {
-    setSampleInputs(sampleInputs.map(slot =>
-      slot.id === id
-        ? { ...slot, sourceSoftware: newSoftware, files: { peptides: null, proteins: null } }
-        : slot
-    ));
-    // Reset files when software changes to avoid incompatible file processing
-  };
-
-  // Handler for changing files for a specific slot
-  const handleSampleFileChange = (id, fileType, file) => {
-    setSampleInputs(sampleInputs.map(slot =>
-      slot.id === id ? { ...slot, files: { ...slot.files, [fileType]: file } } : slot
-    ));
-  };
-
-  // Handler for selecting/deselecting samples for Venn Diagram
-  const handleSelectVennSample = (id) => {
-    setSelectedVennSampleIds(prevSelected => {
-      if (prevSelected.includes(id)) {
-        return prevSelected.filter(sampleId => sampleId !== id);
-      } else {
-        // Limit to 3 samples for Venn
-        if (prevSelected.length < 3) {
-          return [...prevSelected, id];
-        } else {
-          setError("Solo puedes seleccionar hasta 3 muestras para el diagrama de Venn.");
-          return prevSelected;
-        }
-      }
-    });
-  };
-
-  // Function to read and parse a CSV/TSV file manually
-  const parseCSV = (file) => {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = (e) => {
-        const text = e.target.result;
-        
-        const rows = text.split(/\r?\n/).filter(row => row.trim() !== ''); // Split by new line, handle both \r\n and \n, and filter out empty lines
-        if (rows.length === 0) {
-          console.warn(`parseCSV: File ${file.name} is empty after splitting into rows.`);
-          resolve([]);
-          return;
-        }
-        
-        // --- Delimiter Detection ---
-        let detectedDelimiter = ','; // Default to comma
-        if (rows[0].includes('\t')) {
-            const commaCount = (rows[0].match(/,/g) || []).length;
-            const semicolonCount = (rows[0].match(/;/g) || []).length;
-            const tabCount = (rows[0].match(/\t/g) || []).length;
-
-            if (tabCount > Math.max(commaCount, semicolonCount)) {
-                detectedDelimiter = '\t';
-            } else if (semicolonCount > commaCount) {
-                detectedDelimiter = ';';
-            }
-        } else if (rows[0].includes(';')) { // If no tabs, check for semicolons
-            detectedDelimiter = ';';
-        }
-        // console.log(`parseCSV: Detected delimiter for ${file.name}: "${detectedDelimiter}"`); // Debugging line removed for production
-        // --- End Delimiter Detection ---
-
-
-        const headers = rows[0].split(detectedDelimiter).map(header => header.trim().replace(/"/g, ''));
-        const data = [];
-        for (let i = 1; i < rows.length; i++) {
-          const values = rows[i].split(detectedDelimiter); // Use detected delimiter
-          // Only process rows with the correct number of columns
-          if (values.length !== headers.length) {
-            console.warn(`Skipping row ${i + 1} of ${file.name} due to column mismatch (expected ${headers.length}, got ${values.length}). Row content: "${rows[i]}"`);
-            continue; 
-          }
-          const rowObject = {};
-          headers.forEach((header, index) => {
-            // Replace comma decimal separators with dots for numeric conversion
-            const rawValue = values[index].trim().replace(/"/g, '');
-            rowObject[header] = rawValue.replace(/,/g, '.'); // Store all values as strings with dot decimals for consistent parsing later
-          });
-          data.push(rowObject);
-        }
-        resolve(data);
-      };
-      reader.onerror = (e) => reject(e);
-      reader.readAsText(file);
-    });
-  };
-
-  /**
-   * Adapts data from Peaks Studio format to the Unified Data Format (FDU).
-   * @param {Array<Object>} peptidesData - Raw peptides data from Peaks Studio.
-   * @param {Array<Object>} proteinsData - Raw proteins data from Peaks Studio.
-   * @returns {Object} - Object containing analysis results in FDU.
-   */
-  const adaptPeaksStudioData = (peptidesData, proteinsData) => {
-    const requiredPeptidesHeaders = ['Protein Accession', 'Protein Group', 'Unique', 'Peptide', 'Area ', '-10lgP'];
-    const requiredProteinsHeaders = ['Accession', 'Description'];
-
-    const missingPeptidesHeaders = requiredPeptidesHeaders.filter(h => !peptidesData.length || !Object.keys(peptidesData[0]).includes(h));
-    const missingProteinsHeaders = requiredProteinsHeaders.filter(h => !proteinsData.length || !Object.keys(proteinsData[0]).includes(h));
-
-    if (missingPeptidesHeaders.length > 0) {
-      throw new Error(`Missing required headers in Peptides File for Peaks Studio: ${missingPeptidesHeaders.join(', ')}`);
-    }
-    if (missingProteinsHeaders.length > 0) {
-      throw new Error(`Missing required headers in Proteins File for Peaks Studio: ${missingProteinsHeaders.join(', ')}`);
-    }
-
-    const peptidesMap = new Map();
-    peptidesData.forEach(p => {
-      if (!peptidesMap.has(p['Protein Accession'])) peptidesMap.set(p['Protein Accession'], []);
-      peptidesMap.get(p['Protein Accession']).push(p);
-    });
-
-    const proteinsMap = new Map();
-    proteinsData.forEach(p => proteinsMap.set(p['Accession'], p));
-
-    const mergedData = peptidesData.map(peptide => {
-      const proteinInfo = proteinsMap.get(peptide['Protein Accession']);
-      return {
-        ...peptide,
-        Description: proteinInfo ? proteinInfo.Description : '',
-        Accession: proteinInfo ? proteinInfo.Accession : '',
-        'Area ': parseFloat(peptide['Area ']) || 0,
-        '-10lgP': parseFloat(peptide['-10lgP']) || 0,
-      };
-    });
-
-    const totalArea = mergedData.reduce((sum, item) => sum + parseFloat(item['Area ']), 0);
-    const normFactor = totalArea > 0 ? 1000000 / totalArea : 1;
-    
-    const normalizedData = mergedData.map(item => ({
-      ...item,
-      'Area ': parseFloat(item['Area ']) * normFactor,
-    }));
-
-    const proteinGroups = new Map();
-    normalizedData.forEach(d => {
-      const group = d['Protein Group'];
-      if (!proteinGroups.has(group)) proteinGroups.set(group, new Set());
-      proteinGroups.get(group).add(d['Protein Accession']);
-    });
-
-    const uniquePeptides = new Map();
-    normalizedData.forEach(d => {
-      if (d['Unique'] === 'Y') {
-        if (!uniquePeptides.has(d['Protein Accession'])) uniquePeptides.set(d['Protein Accession'], new Set());
-        uniquePeptides.get(d['Protein Accession']).add(d.Peptide);
-      }
-    });
-    
-    const processedData = normalizedData.map(d => ({
-      ...d,
-      'Is Protein Group Unique?': proteinGroups.get(d['Protein Group']).size === 1,
-      'Unique Peptides List': Array.from(uniquePeptides.get(d['Protein Accession']) || []).join('; '),
-      '# Unique Peptides': (uniquePeptides.get(d['Protein Accession']) || []).size,
-    }));
-
-    const uniqueProteinsMap = new Map();
-    processedData.forEach(item => {
-      const group = item['Protein Group'];
-      if (!uniqueProteinsMap.has(group) || parseFloat(item['-10lgP']) > parseFloat(uniqueProteinsMap.get(group)['-10lgP'])) {
-        uniqueProteinsMap.set(group, item);
-      }
-    });
-    const uniqueProteins = Array.from(uniqueProteinsMap.values());
-    
-    const pathogenicVariants = uniqueProteins.filter(p => 
-      (p['Protein Accession'] && pathogenicPattern.test(p['Protein Accession'])) &&
-      (p.Description && p.Description.includes('PATHOGENIC_VARIANT'))
-    );
-
-    /**
-     * @type {ProteinData[]}
-     */
-    const finalResultsFDU = pathogenicVariants.map(variant => {
-      const peptidesForVariant = processedData.filter(p => p['Protein Accession'] === variant['Protein Accession']);
-      const totalPeptides = peptidesForVariant.length;
-      const avgArea = totalPeptides > 0 ? peptidesForVariant.reduce((sum, p) => sum + parseFloat(p['Area ']), 0) / totalPeptides : 0;
-      // const proteinsInGroup = proteinGroups.get(variant['Protein Group']).size; // This isn't directly needed for FDU output
-
-      return {
-        accession: variant['Protein Accession'],
-        description: variant.Description,
-        diseaseAssociation: extractDiseaseAssociation(variant.Description), // Extract association here
-        averageAbundance: avgArea,
-        totalPeptides: totalPeptides,
-        uniquePeptidesCount: variant['# Unique Peptides'],
-        isUniqueGroup: variant['Is Protein Group Unique?'],
-        uniquePeptidesList: variant['Unique Peptides List'],
-        rawScore: parseFloat(variant['-10lgP'])
-      };
-    }).sort((a, b) => b.averageAbundance - a.averageAbundance); // Sort by FDU field
-
-    return {
-      analysisResults: finalResultsFDU,
-      totalPeptidesCount: peptidesData.length,
-      totalProteinsCount: uniqueProteins.length,
-      normalizationFactor: normFactor,
-    };
-  };
-
-  const adaptMaxQuantData = (peptidesRawData, proteinsRawData) => {
-    console.warn("MaxQuant data adaptation is not fully implemented. Using dummy data.");
-    return {
-        analysisResults: [], // Should return array of ProteinData
-        totalPeptidesCount: 0,
-        totalProteinsCount: 0,
-        normalizationFactor: 1,
-    };
-  };
-
-  /**
-   * Adapts data from Proteome Discoverer format to the Unified Data Format (FDU).
-   * @param {Array<Object>} peptidesData - Raw peptides data from Proteome Discoverer.
-   * @param {Array<Object>} proteinsData - Raw proteins data from Proteome Discoverer.
-   * @returns {Object} - Object containing analysis results in FDU.
-   */
-  const adaptProteomeDiscovererData = (peptidesData, proteinsData) => {
-    // Check if data is empty first
-    if (peptidesData.length === 0) {
-      throw new Error("Peptides File for Proteome Discoverer is empty or contains no data rows.");
-    }
-    if (proteinsData.length === 0) {
-      throw new Error("Proteins File for Proteome Discoverer is empty or contains no data rows.");
-    }
-
-    const normalizeHeader = (header) => header.replace(/\s/g, '').toLowerCase();
-
-    const findExactHeader = (actualHeadersList, requiredHeaderRaw) => {
-        const normalizedRequired = normalizeHeader(requiredHeaderRaw);
-        for (const actualHeader of actualHeadersList) {
-            const normalizedActual = normalizeHeader(actualHeader);
-            if (normalizedActual === normalizedRequired) {
-                return actualHeader;
-            }
-        }
-        return null;
-    };
-
-    const actualPeptidesHeadersList = Object.keys(peptidesData[0]);
-    const actualProteinsHeadersList = Object.keys(proteinsData[0]);
-    
-    // Find and validate exact header names
-    const peptideSequenceHeader = findExactHeader(actualPeptidesHeadersList, 'Sequence');
-    const peptideMasterAccessionsHeader = findExactHeader(actualPeptidesHeadersList, 'Master Protein Accessions');
-    const proteinAccessionHeader = findExactHeader(actualProteinsHeadersList, 'Accession');
-    const proteinDescriptionHeader = findExactHeader(actualProteinsHeadersList, 'Description');
-    const proteinTotalPeptidesHeader = findExactHeader(actualProteinsHeadersList, '# Peptides');
-    const proteinUniquePeptidesHeader = findExactHeader(actualProteinsHeadersList, '# Unique Peptides');
-    const proteinGroupsHeader = findExactHeader(actualProteinsHeadersList, '# Protein Groups');
-    const proteinScoreHeader = findExactHeader(actualProteinsHeadersList, 'Score Sequest HT: Sequest HT');
-    const proteinAbundanceHeader = findExactHeader(actualProteinsHeadersList, 'Sum PEP Score'); // Assuming 'Sum PEP Score' is the abundance
-
-    // Check all required headers
-    const requiredHeaders = [
-      { type: 'peptide', header: peptideSequenceHeader, name: 'Sequence' },
-      { type: 'peptide', header: peptideMasterAccessionsHeader, name: 'Master Protein Accessions' },
-      { type: 'protein', header: proteinAccessionHeader, name: 'Accession' },
-      { type: 'protein', header: proteinDescriptionHeader, name: 'Description' },
-      { type: 'protein', header: proteinTotalPeptidesHeader, name: '# Peptides' },
-      { type: 'protein', header: proteinUniquePeptidesHeader, name: '# Unique Peptides' },
-      { type: 'protein', header: proteinGroupsHeader, name: '# Protein Groups' },
-      { type: 'protein', header: proteinScoreHeader, name: 'Score Sequest HT: Sequest HT' },
-      { type: 'protein', header: proteinAbundanceHeader, name: 'Sum PEP Score' }
-    ];
-
-    requiredHeaders.forEach(req => {
-      if (!req.header) {
-        throw new Error(`Missing '${req.name}' header in ${req.type === 'peptide' ? 'Peptides' : 'Proteins'} File for Proteome Discoverer.`);
-      }
-    });
-
-    const proteinsMap = new Map();
-    proteinsData.forEach(p => proteinsMap.set(p[proteinAccessionHeader], p));
-
-    const peptidesByProteinMap = new Map();
-    peptidesData.forEach(peptide => {
-        const proteinAccessions = peptide[peptideMasterAccessionsHeader].split(';').map(acc => acc.trim());
-        proteinAccessions.forEach(acc => {
-            if (acc && proteinsMap.has(acc)) {
-                if (!peptidesByProteinMap.has(acc)) {
-                    peptidesByProteinMap.set(acc, []);
+    // State to manage multiple file input sets
+    const [sampleInputs, setSampleInputs] = useState([{ id: 1, name: '', sourceSoftware: 'Peaks Studio', files: { peptides: null, proteins: null } }]);
+    const [proteinsData, setProteinsData] = useState([]);
+    const [commonProteins, setCommonProteins] = useState([]);
+    const [vennData, setVennData] = useState({ sets: [], overlaps: [] });
+    const [showTables, setShowTables] = useState(false);
+    const [tooltip, setTooltip] = useState(null);
+    const [copyMessage, setCopyMessage] = useState(null);
+    const [db, setDb] = useState(null);
+    const [userId, setUserId] = useState(null);
+    const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+    const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+    const auth = getAuth();
+
+    useEffect(() => {
+        const app = initializeApp(firebaseConfig);
+        const firestore = getFirestore(app);
+        const auth = getAuth(app);
+        setDb(firestore);
+
+        const unsubscribe = onAuthStateChanged(auth, async (user) => {
+            if (user) {
+                setUserId(user.uid);
+            } else {
+                try {
+                    if (typeof __initial_auth_token !== 'undefined') {
+                        await signInWithCustomToken(auth, __initial_auth_token);
+                    } else {
+                        await signInAnonymously(auth);
+                    }
+                } catch (error) {
+                    console.error("Firebase Auth Error:", error);
                 }
-                peptidesByProteinMap.get(acc).push(peptide);
             }
         });
-    });
+        return () => unsubscribe();
+    }, []);
 
-    /**
-     * @type {ProteinData[]}
-     */
-    const uniqueProteinsFDU = [];
-    proteinsData.forEach(protein => {
-      const accession = protein[proteinAccessionHeader];
-      const description = protein[proteinDescriptionHeader];
+    useEffect(() => {
+        if (!userId || !db) return;
 
-      const associatedPeptides = peptidesByProteinMap.get(accession) || [];
-      const totalPeptides = parseInt(protein[proteinTotalPeptidesHeader]) || 0;
-      const uniquePeptidesCount = parseInt(protein[proteinUniquePeptidesHeader]) || 0;
-      
-      const uniquePeptideSequences = new Set();
-      if (protein[proteinGroupsHeader] === '1') {
-        associatedPeptides.forEach(p => uniquePeptideSequences.add(p[peptideSequenceHeader]));
-      }
-      const uniquePeptidesList = Array.from(uniquePeptideSequences).join('; ');
-
-      const isUniqueGroup = protein[proteinGroupsHeader] === '1';
-      const areaKey = Object.keys(protein).find(key => key.startsWith('Area '));
-    const averageAbundance = areaKey ? parseFloat(protein[areaKey] || 0) : 0;
-      const rawScore = parseFloat(protein[proteinScoreHeader]) || 0;
-
-      const isPathogenicByAccession = pathogenicPattern.test(accession);
-      const isPathogenicByDescription = description && (
-          description.includes('PATHOGENIC_VARIANT') ||
-          description.includes('ClinicalSignificance:')
-      );
-
-      if (isPathogenicByAccession && isPathogenicByDescription) {
-            uniqueProteinsFDU.push({
-                accession: accession,
-                description: description,
-                diseaseAssociation: extractDiseaseAssociation(description),
-                averageAbundance: averageAbundance,
-                totalPeptides: totalPeptides,
-                uniquePeptidesCount: uniquePeptidesCount,
-                isUniqueGroup: isUniqueGroup,
-                uniquePeptidesList: uniquePeptidesList,
-                rawScore: rawScore
+        // Fetch data from Firestore for real-time updates
+        const q = query(collection(db, `artifacts/${appId}/users/${userId}/proteinData`));
+        const unsubscribe = onSnapshot(q, (querySnapshot) => {
+            const fetchedData = [];
+            querySnapshot.forEach((doc) => {
+                const data = doc.data();
+                fetchedData.push(data);
             });
-        }
-    });
-
-    const finalResults = uniqueProteinsFDU.sort((a, b) => b.averageAbundance - a.averageAbundance);
-
-    return {
-      analysisResults: finalResults,
-      totalPeptidesCount: peptidesData.length,
-      totalProteinsCount: proteinsData.length,
-      normalizationFactor: 1, // Proteome Discoverer usually provides absolute values, normalization might be external
-    };
-  };
-
-  const adaptSpectronautData = (dataRaw) => {
-    console.warn("Spectronaut data adaptation is not fully implemented. Using dummy data.");
-    return {
-        analysisResults: [], // Should return array of ProteinData
-        totalPeptidesCount: 0,
-        totalProteinsCount: 0,
-        normalizationFactor: 1,
-    };
-  };
-
-  const adaptDiannData = (dataRaw) => {
-    console.warn("DIA-NN data adaptation is not fully implemented. Using dummy data.");
-    return {
-        analysisResults: [], // Should return array of ProteinData
-        totalPeptidesCount: 0,
-        totalProteinsCount: 0,
-        normalizationFactor: 1,
-    };
-  };
-
-  const processAllSamples = async () => {
-    setLoading(true);
-    setError(null);
-    const newProcessedSamples = [];
-    let hasError = false;
-
-    for (const sampleInput of sampleInputs) {
-      if (!sampleInput.name || sampleInput.name.trim() === '') {
-        setError(`Error: Sample in slot ${sampleInput.id} does not have a valid name.`);
-        hasError = true;
-        break;
-      }
-      
-      let processedSampleData;
-      try {
-        switch (sampleInput.sourceSoftware) {
-          case 'Peaks Studio':
-            if (!sampleInput.files.peptides || !sampleInput.files.proteins) {
-              setError(`Error: Sample "${sampleInput.name}" (Peaks Studio) requires both 'Peptides File' and 'Proteins File'.`);
-              hasError = true;
-              break;
-            }
-            const peaksPeptidesData = await parseCSV(sampleInput.files.peptides);
-            const peaksProteinsData = await parseCSV(sampleInput.files.proteins);
-            processedSampleData = adaptPeaksStudioData(peaksPeptidesData, peaksProteinsData);
-            break;
-          case 'MaxQuant':
-            if (!sampleInput.files.peptides || !sampleInput.files.proteins) {
-                setError(`Error: Sample "${sampleInput.name}" (MaxQuant) requires both 'Peptides File' and 'Proteins File'.`);
-                hasError = true;
-                break;
-            }
-            const mqPeptidesData = await parseCSV(sampleInput.files.peptides);
-            const mqProteinsData = await parseCSV(sampleInput.files.proteins);
-            processedSampleData = adaptMaxQuantData(mqPeptidesData, mqProteinsData);
-            break;
-          case 'Proteome Discoverer':
-            if (!sampleInput.files.peptides || !sampleInput.files.proteins) {
-                setError(`Error: Sample "${sampleInput.name}" (Proteome Discoverer) requires both 'Peptides File' and 'Proteins File'.`);
-                hasError = true;
-                break;
-            }
-            const pdPeptidesData = await parseCSV(sampleInput.files.peptides);
-            const pdProteinsData = await parseCSV(sampleInput.files.proteins);
-            processedSampleData = adaptProteomeDiscovererData(pdPeptidesData, pdProteinsData);
-            break;
-          case 'Spectronaut':
-            if (!sampleInput.files.peptides) {
-                setError(`Error: Sample "${sampleInput.name}" (Spectronaut) requires a 'Peptides File'.`);
-                hasError = true;
-                break;
-            }
-            const spectronautData = await parseCSV(sampleInput.files.peptides);
-            processedSampleData = adaptSpectronautData(spectronautData);
-            break;
-          case 'DIA-NN':
-            if (!sampleInput.files.peptides) {
-                setError(`Error: Sample "${sampleInput.name}" (DIA-NN) requires a 'Peptides File'.`);
-                hasError = true;
-                break;
-            }
-            const diannData = await parseCSV(sampleInput.files.peptides);
-            processedSampleData = adaptDiannData(diannData);
-            break;
-          default:
-            setError(`Error: Unknown software type for sample "${sampleInput.name}".`);
-            hasError = true;
-            break;
-        }
-
-        if (hasError) break;
-
-        newProcessedSamples.push({
-          id: sampleInput.id,
-          name: sampleInput.name.trim(),
-          // analysisResults now contains FDU objects
-          analysisResults: processedSampleData.analysisResults,
-          totalPeptidesCount: processedSampleData.totalPeptidesCount,
-          totalProteinsCount: processedSampleData.totalProteinsCount,
-          normalizationFactor: processedSampleData.normalizationFactor,
+            // Update state with fetched data
+            console.log("Datos de Firestore actualizados:", fetchedData);
+        }, (error) => {
+            console.error("Error al obtener datos de Firestore:", error);
         });
 
-      } catch (err) {
-        console.error(`Error processing sample ${sampleInput.name}:`, err);
-        setError(`An error occurred while processing sample "${sampleInput.name}". Please ensure files are valid CSVs and contain expected columns for ${sampleInput.sourceSoftware}. Specific error: ${err.message}`);
-        hasError = true;
-        break;
-      }
-    }
+        return () => unsubscribe();
+    }, [userId, db, appId]);
 
-    if (!hasError) {
-      setProcessedSamples(newProcessedSamples);
-      setSelectedProcessedSampleIds(newProcessedSamples.map(s => s.id));
-      if (newProcessedSamples.length > 0) {
-        setError(null);
-      } else {
-        setError("No samples could be processed. Ensure all files are loaded and names are correct.");
-      }
-    }
-    setLoading(false);
-  };
-
-  // Function to validate the form before enabling the "Process All Samples" button
-  const isFormValid = () => {
-    for (const sample of sampleInputs) {
-      if (!sample.name || sample.name.trim() === '') {
-        console.warn(`Validation: Sample ${sample.id} has no name or only whitespace.`);
-        return false;
-      }
-      if (!sample.files.peptides) {
-        console.warn(`Validation: Sample ${sample.id} is missing a peptides file.`);
-        return false;
-      }
-      // Only require proteins file for specific software types
-      if (
-        (sample.sourceSoftware === 'Peaks Studio' ||
-         sample.sourceSoftware === 'MaxQuant' ||
-         sample.sourceSoftware === 'Proteome Discoverer') &&
-        !sample.files.proteins
-      ) {
-        console.warn(`Validation: Sample ${sample.id} (${sample.sourceSoftware}) is missing a proteins file.`);
-        return false;
-      }
-    }
-    console.log("Validation: All samples are valid.");
-    return true;
-  };
-
-  // Handler for selecting/deselecting samples for comparison
-  const handleSelectSampleForComparison = (id) => {
-    setSelectedProcessedSampleIds(prevSelected =>
-      prevSelected.includes(id)
-        ? prevSelected.filter(sampleId => sampleId !== id)
-        : [...prevSelected, id]
-    );
-  };
-
-
-  // Function to get color for heatmap cell based on abundance
-  const getHeatmapColor = (abundance) => {
-    if (abundance === 0) return 'rgba(240, 240, 240, 1)';
-    const hue = 210;
-    const saturation = 80;
-    const maxLightness = 95;
-    const minLightness = 30;
-
-    const scaledAbundance = maxAbundance > 0 ? (abundance / maxAbundance) : 0;
-    const lightness = maxLightness - (scaledAbundance * (maxLightness - minLightness));
-    
-    return `hsl(${hue}, ${saturation}%, ${lightness}%)`;
-  };
-
-
-  // Function to export the comparative table to CSV
-  const exportComparativeToCsv = () => {
-    if (comparativeTableRows.length === 0) {
-      setError("No comparative table data to export.");
-      return;
-    }
-    setIsExporting(true);
-
-    const csvRows = [];
-    csvRows.push(comparativeHeaders.join(','));
-
-    comparativeTableRows.forEach(row => {
-      const formattedRow = row.map(cell => {
-        if (typeof cell === 'string' && (cell.includes(',') || cell.includes('"'))) {
-          return `"${cell.replace(/"/g, '""')}"`;
+    const handleFileChange = (e, sampleId, fileType) => {
+        const file = e.target.files[0];
+        if (file) {
+            setSampleInputs(prevInputs =>
+                prevInputs.map(input =>
+                    input.id === sampleId
+                        ? { ...input, files: { ...input.files, [fileType]: file } }
+                        : input
+                )
+            );
         }
-        return cell;
-      });
-      csvRows.push(formattedRow.join(','));
-    });
+    };
 
-    const csvString = csvRows.join('\n');
-    const blob = new Blob([csvString], { type: 'text/csv;charset=utf-8;' });
-    const link = document.createElement('a');
-    if (link.download !== undefined) {
-      const url = URL.createObjectURL(blob);
-      link.setAttribute('href', url);
-      link.setAttribute('download', 'comparative_biomarker_analysis.csv');
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      URL.revokeObjectURL(url);
-    } else {
-      setError("Your browser does not support direct file download.");
-    }
-    setIsExporting(false);
-  };
+    const handleInputChange = (e, sampleId, field) => {
+        const value = e.target.value;
+        setSampleInputs(prevInputs =>
+            prevInputs.map(input =>
+                input.id === sampleId
+                    ? { ...input, [field]: value }
+                    : input
+            )
+        );
+    };
 
-  return (
-    <div className="bg-gray-100 min-h-screen p-4 sm:p-8 font-sans">
-      <div className="max-w-4xl mx-auto bg-white p-6 rounded-3xl shadow-lg">
-        <h1 className="text-3xl sm:text-4xl font-extrabold text-blue-700 mb-2">Multi-Sample Biomarker Analysis</h1>
-        <p className="text-lg text-gray-600 mb-8">Carga y compara la abundancia de proteínas patogénicas entre diferentes muestras.</p>
+    const addSampleInput = () => {
+        const newId = sampleInputs.length > 0 ? Math.max(...sampleInputs.map(s => s.id)) + 1 : 1;
+        setSampleInputs(prevInputs => [...prevInputs, { id: newId, name: '', sourceSoftware: 'Peaks Studio', files: { peptides: null, proteins: null } }]);
+    };
 
-        {/* Section to manage sample slots */}
-        <div className="mb-8 p-6 bg-blue-50 rounded-3xl shadow-inner">
-          <h2 className="text-xl font-bold text-blue-800 mb-4">Gestionar Muestras</h2>
-          {sampleInputs.map((sampleSlot, index) => (
-            <div key={sampleSlot.id} className="mb-6 p-4 bg-white rounded-2xl border border-gray-200 shadow-sm">
-              <div className="flex justify-between items-center mb-3">
-                <label htmlFor={`sampleName-${sampleSlot.id}`} className="block text-base font-medium text-gray-700">Muestra {index + 1}</label>
-                {sampleInputs.length > 1 && (
-                  <button
-                    onClick={() => removeSampleInputSlot(sampleSlot.id)}
-                    className="text-red-600 hover:text-red-800 text-sm font-semibold"
-                  >
-                    Eliminar
-                  </button>
-                )}
-              </div>
-              <input
-                type="text"
-                id={`sampleName-${sampleSlot.id}`}
-                value={sampleSlot.name}
-                onChange={(e) => handleSampleNameChange(sampleSlot.id, e.target.value)}
-                placeholder="Nombre de la muestra (ej: Control, Tratado)"
-                className="w-full p-2 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 mb-4"
-              />
-              {/* New: Source Software Selector */}
-              <div className="mb-4">
-                <label htmlFor={`sourceSoftware-${sampleSlot.id}`} className="block text-sm font-medium text-gray-700 mb-1">Software de Origen:</label>
-                <select
-                  id={`sourceSoftware-${sampleSlot.id}`}
-                  value={sampleSlot.sourceSoftware}
-                  onChange={(e) => handleSourceSoftwareChange(sampleSlot.id, e.target.value)}
-                  className="w-full p-2 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500"
-                >
-                  <option value="Peaks Studio">Peaks Studio</option>
-                  <option value="MaxQuant">MaxQuant</option>
-                  <option value="Proteome Discoverer">Proteome Discoverer</option>
-                  <option value="Spectronaut">Spectronaut</option>
-                  <option value="DIA-NN">DIA-NN</option>
-                </select>
-              </div>
-              <div className="space-y-3">
-                {/* File inputs dynamically shown based on software */}
-                <div className="p-2 bg-gray-50 rounded-xl border border-gray-100">
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    {sampleSlot.sourceSoftware === 'Spectronaut' || sampleSlot.sourceSoftware === 'DIA-NN' ? 
-                      'Archivo de Datos (ej: PeptideGroups.tsv / proteins.tsv)' : 
-                      (sampleSlot.sourceSoftware === 'Peaks Studio' ? 'Archivo de Péptidos (ej: protein-peptides.csv / .txt / .tsv)' : 'Archivo de Péptidos (ej: protein-peptides.csv / PeptideGroups.txt)')}
-                  </label>
-                  <input 
-                    type="file" 
-                    accept=".csv,.txt,.tsv"
-                    onChange={(e) => handleSampleFileChange(sampleSlot.id, 'peptides', e.target.files[0])} 
-                    className="w-full text-gray-500 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-blue-100 file:text-blue-700 hover:file:bg-blue-200"
-                  />
-                </div>
-                {/* Proteins file is generally needed for Peaks, MaxQuant, PD. Spectronaut/DIA-NN often consolidate. */}
-                {(sampleSlot.sourceSoftware === 'Peaks Studio' || sampleSlot.sourceSoftware === 'MaxQuant' || sampleSlot.sourceSoftware === 'Proteome Discoverer') && (
-                  <div className="p-2 bg-gray-50 rounded-xl border border-gray-100">
-                    <label className="block text-sm font-medium text-gray-700 mb-1">
-                      {sampleSlot.sourceSoftware === 'Peaks Studio' ? 'Archivo de Proteínas (ej: `proteins.csv` / `.txt` / `.tsv`)' : 'Archivo de Proteínas (ej: `proteins.csv` / `Proteins.txt`)'}
-                    </label>
-                    <input 
-                      type="file" 
-                      accept=".csv,.txt,.tsv"
-                      onChange={(e) => handleSampleFileChange(sampleSlot.id, 'proteins', e.target.files[0])} 
-                      className="w-full text-gray-500 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-blue-100 file:text-blue-700 hover:file:bg-blue-200"
-                    />
-                  </div>
-                )}
-              </div>
-            </div>
-          ))}
-          <button
-            onClick={addSampleInputSlot}
-            className="w-full py-2 px-4 bg-gray-200 text-gray-700 font-semibold rounded-2xl hover:bg-gray-300 transition-colors mb-4"
-          >
-            + Añadir Ranura de Muestra
-          </button>
-          <button
-            onClick={processAllSamples}
-            disabled={loading || !isFormValid()}
-            className="w-full py-3 px-6 bg-blue-600 text-white font-bold rounded-2xl shadow-md hover:bg-blue-700 transition-colors disabled:bg-blue-300 disabled:cursor-not-allowed flex items-center justify-center space-x-2"
-          >
-            {loading && (
-              <svg className="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-              </svg>
-            )}
-            <span>{loading ? "Procesando Muestras..." : "Procesar Todas las Muestras"}</span>
-          </button>
-        </div>
+    const removeSampleInput = (id) => {
+        setSampleInputs(prevInputs => prevInputs.filter(input => input.id !== id));
+    };
 
-        {/* Error Message */}
-        {error && (
-          <div className="mt-4 p-4 text-red-700 bg-red-100 rounded-2xl border border-red-200">
-            <p className="font-semibold">Error:</p>
-            <p>{error}</p>
-          </div>
-        )}
+    const processFiles = async () => {
+        const allProteins = {};
+        const allProteinGroups = {};
+        const allPeptideSets = {};
+        const proteinAccessions = new Set();
+        let uniqueGroupCounter = 0;
+        let proteinIdCounter = 0;
 
-        {/* Sample Selector for Comparison */}
-        {processedSamples.length > 0 && (
-          <div className="mb-8 p-6 bg-gray-50 rounded-3xl shadow-inner">
-            <h2 className="text-xl font-bold text-gray-800 mb-4">Seleccionar Muestras para Comparación</h2>
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-              {processedSamples.map(sample => (
-                <label key={sample.id} className="inline-flex items-center p-2 bg-white rounded-xl border border-gray-200 shadow-sm cursor-pointer hover:bg-gray-100 transition-colors">
-                  <input
-                    type="checkbox"
-                    checked={selectedProcessedSampleIds.includes(sample.id)}
-                    onChange={() => handleSelectSampleForComparison(sample.id)}
-                    className="form-checkbox h-5 w-5 text-blue-600 rounded focus:ring-blue-500"
-                  />
-                  <span className="ml-2 text-gray-700 font-medium">{sample.name}</span>
-                </label>
-              ))}
-            </div>
-            {selectedProcessedSampleIds.length > 0 && (
-              <p className="text-sm text-gray-600 mt-4">Muestras seleccionadas: {selectedProcessedSampleIds.length}</p>
-            )}
-          </div>
-        )}
-        
-        {/* Visualizations Section */}
-        {(processedSamples.length > 0) && (
-          <div className="mt-8 p-6 bg-gray-50 rounded-3xl shadow-inner">
-            <h2 className="text-2xl font-bold text-gray-800 mb-6">Visualizaciones</h2>
+        for (const input of sampleInputs) {
+            if (!input.files.proteins || !input.files.peptides) continue;
 
-            {/* Comparative Bar Chart */}
-            <h3 className="text-xl font-bold text-gray-700 mb-4">Gráfico de Barras Comparativo (Selecciona una Proteína)</h3>
-            <div className="mb-4">
-              <label htmlFor="proteinForChart" className="block text-sm font-medium text-gray-700 mb-1">Seleccionar Acceso de Proteína:</label>
-              <select
-                id="proteinForChart"
-                value={selectedProteinForChart}
-                onChange={(e) => setSelectedProteinForChart(e.target.value)}
-                className="w-full p-2 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500"
-                disabled={!allUniqueProteins || allUniqueProteins.length === 0}
-              >
-                <option value="">-- Selecciona una Proteína --</option>
-                {allUniqueProteins.map(accession => (
-                  <option key={accession} value={accession}>{accession}</option>
-                ))}
-              </select>
-            </div>
-            {selectedProteinForChart && isChartLibraryLoaded ? (
-              <div className="mb-8 p-4 bg-white rounded-2xl border border-gray-200 shadow-sm" style={{ height: '400px', width: '100%' }}>
-                <canvas ref={comparativeChartCanvasRef}></canvas>
-              </div>
-            ) : (
-                <div className="mb-8 p-4 text-gray-600 bg-gray-100 rounded-2xl border border-gray-200">
-                    <p className="font-semibold">Selecciona una proteína del menú desplegable de arriba para ver su abundancia comparativa entre muestras.</p>
-                </div>
-            )}
-            {!isChartLibraryLoaded && (
-                <div className="mt-4 p-4 text-gray-700 bg-gray-100 rounded-2xl border border-gray-200">
-                    <p className="font-semibold">Cargando la librería de gráficos... Por favor, espera a que aparezcan las visualizaciones.</p>
-                </div>
-            )}
+            // Process proteins file
+            const proteinsText = await input.files.proteins.text();
+            const proteinsLines = proteinsText.split('\n').slice(1).filter(l => l.trim());
+            const parsedProteins = {};
+            const proteinAccsInFile = new Set();
+            proteinsLines.forEach(line => {
+                const parts = line.split('\t');
+                const accession = parts[2].split('|').pop().replace(/"/g, '');
+                const rawScore = parseFloat(parts[3]);
+                const description = parts[parts.length - 1].replace(/"/g, '').trim();
 
+                const isPathogenic = pathogenicPattern.test(description) || description.toLowerCase().includes('pathogenic');
+                const diseaseAssociation = isPathogenic ? "Pathogenic" : "N/A";
+                const avgAbundance = parseFloat(parts[parts.length - 5]);
+                const totalPeptides = parseInt(parts[parts.length - 4]);
+                const uniquePeptidesCount = parseInt(parts[parts.length - 3]);
+                const proteinGroup = parseInt(parts[0]);
 
-            {/* Heatmap */}
-            <h3 className="text-xl font-bold text-gray-700 mb-4 mt-8">Mapa de Calor de Abundancia Comparativa</h3>
-            <div className="overflow-x-auto p-4 bg-white rounded-2xl border border-gray-200 shadow-sm">
-                {visualizationData.length > 0 && samplesForComparison.length > 0 ? (
-                    <div className="inline-block min-w-full">
-                        {/* Heatmap Header (Sample Names) */}
-                        <div className="flex flex-row sticky top-0 bg-white z-10 border-b border-gray-200">
-                            <div className="flex-shrink-0" style={{ width: '200px', padding: '8px', fontWeight: 'bold' }}>Acceso de Proteína</div>
-                            {samplesForComparison.map(sample => (
-                                <div key={sample.id} className="flex-shrink-0 text-center" style={{ width: '100px', padding: '8px', fontWeight: 'bold' }}>{sample.name}</div>
-                            ))}
-                        </div>
-                        {/* Heatmap Grid */}
-                        {visualizationData.map((proteinRow, rowIndex) => (
-                            <div key={rowIndex} className="flex flex-row border-b border-gray-100 hover:bg-gray-50">
-                                <div className="flex-shrink-0 overflow-hidden whitespace-nowrap overflow-ellipsis" style={{ width: '200px', padding: '8px', borderRight: '1px solid #e5e7eb' }} title={proteinRow.proteinAccession}>
-                                    {proteinRow.proteinAccession}
-                                </div>
-                                {samplesForComparison.map(sample => (
-                                    <div 
-                                        key={sample.id} 
-                                        className="flex-shrink-0 text-center flex items-center justify-center text-xs font-mono" 
-                                        style={{ 
-                                            width: '100px', 
-                                            padding: '8px', 
-                                            backgroundColor: getHeatmapColor(proteinRow.abundancesBySample[sample.name]),
-                                            color: proteinRow.abundancesBySample[sample.name] > maxAbundance / 2 ? 'white' : 'black', // Text color for contrast
-                                            borderRight: '1% solid #e5e7eb'
-                                        }}
-                                        title={`Abundancia: ${proteinRow.abundancesBySample[sample.name].toFixed(2)}`}
-                                    >
-                                        {proteinRow.abundancesBySample[sample.name] > 0 ? proteinRow.abundancesBySample[sample.name].toFixed(0) : 'N/A'}
-                                    </div>
-                                ))}
-                            </div>
-                        ))}
-                    </div>
-                ) : (
-                    <div className="p-4 text-gray-600 bg-gray-100 rounded-2xl border border-gray-200">
-                        <p className="font-semibold">No hay datos disponibles para el mapa de calor. Procesa las muestras y selecciónalas para comparar.</p>
-                    </div>
-                )}
-            </div>
+                if (!parsedProteins[accession]) {
+                    parsedProteins[accession] = {
+                        accession,
+                        description,
+                        diseaseAssociation,
+                        averageAbundance: avgAbundance,
+                        totalPeptides,
+                        uniquePeptidesCount,
+                        uniquePeptidesList: '',
+                        rawScore: rawScore,
+                        isUniqueGroup: false,
+                        proteinGroup
+                    };
+                }
+                proteinAccsInFile.add(accession);
+                proteinAccessions.add(accession);
+            });
+            allProteinGroups[input.id] = proteinAccsInFile;
+            allProteins[input.id] = parsedProteins;
 
-            {/* Venn Diagram Section */}
-            <h3 className="text-xl font-bold text-gray-700 mb-4 mt-8">Análisis por Diagramas de Venn</h3>
-            <div className="mb-4">
-                <label className="block text-sm font-medium text-gray-700 mb-1">Selecciona 2 o 3 muestras para el Diagrama de Venn:</label>
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-                {processedSamples.map(sample => (
-                    <label key={sample.id} className="inline-flex items-center p-2 bg-white rounded-xl border border-gray-200 shadow-sm cursor-pointer hover:bg-gray-100 transition-colors">
-                    <input
-                        type="checkbox"
-                        checked={selectedVennSampleIds.includes(sample.id)}
-                        onChange={() => handleSelectVennSample(sample.id)}
-                        className="form-checkbox h-5 w-5 text-blue-600 rounded focus:ring-blue-500"
-                        disabled={!selectedVennSampleIds.includes(sample.id) && selectedVennSampleIds.length >= 3}
-                    />
-                    <span className="ml-2 text-gray-700 font-medium">{sample.name}</span>
-                    </label>
-                ))}
-                </div>
-            </div>
-            {selectedVennSampleIds.length >= 2 && selectedVennSampleIds.length <= 3 && isD3Loaded && isD3VennLoaded && window.d3 && window.venn ? (
-                <div className="mb-8 p-4 bg-white rounded-2xl border border-gray-200 shadow-sm flex justify-center items-center" style={{ height: '450px', width: '100%' }}>
-                    <div ref={vennDiagramRef} className="venn-container"></div>
-                </div>
-            ) : (
-                <div className="mb-8 p-4 text-gray-600 bg-gray-100 rounded-2xl border border-gray-200">
-                    <p className="font-semibold">Por favor, selecciona entre 2 y 3 muestras procesadas para generar el Diagrama de Venn.</p>
-                </div>
-            )}
-            {processedSamples.length > 0 && (!isD3Loaded || !isD3VennLoaded) && (
-                <div className="mt-4 p-4 text-gray-700 bg-gray-100 rounded-2xl border border-gray-200">
-                    <p className="font-semibold">Cargando librerías necesarias para el Diagrama de Venn (D3 y D3-Venn)... Por favor, espera.</p>
-                </div>
-            )}
+            // Process peptides file
+            const peptidesText = await input.files.peptides.text();
+            const peptidesLines = peptidesText.split('\n').slice(1).filter(l => l.trim());
+            const peptideSet = new Set();
+            peptidesLines.forEach(line => {
+                const parts = line.split('\t');
+                if (parts[4] === 'Y') {
+                    peptideSet.add(parts[3]);
+                }
+            });
+            allPeptideSets[input.id] = peptideSet;
+        }
 
-          </div>
-        )}
-        {!processedSamples.length > 0 && (
-            <div className="mt-8 p-4 text-gray-700 bg-gray-100 rounded-2xl border border-gray-200">
-                <p className="font-semibold">Procesa al menos dos muestras para generar visualizaciones y la tabla comparativa.</p>
-            </div>
-        )}
+        const proteinDataArray = [];
+        const uniqueProteinGroups = {};
+        const overlaps = {};
 
-        {/* Comparative Table Section */}
-        {comparativeTableRows.length > 0 && (
-          <div className="mt-8">
-            <h2 className="text-2xl font-bold text-gray-800 mb-4">Tabla de Abundancia Comparativa</h2>
-            <p className="text-gray-600 mb-4 text-sm italic">
-                Abundancias normalizadas para las muestras seleccionadas.
+        for (const input of sampleInputs) {
+            if (!allProteins[input.id]) continue;
+            for (const acc in allProteins[input.id]) {
+                const protein = allProteins[input.id][acc];
+                const peptideList = Array.from(allPeptideSets[input.id]).join(';');
+                proteinDataArray.push({
+                    ...protein,
+                    uniquePeptidesList: peptideList,
+                    sampleId: input.id,
+                    sampleName: input.name,
+                    sourceSoftware: input.sourceSoftware,
+                    isUniqueGroup: false
+                });
+
+                // Determine unique protein groups for Venn Diagram
+                if (!uniqueProteinGroups[acc]) {
+                    uniqueProteinGroups[acc] = new Set();
+                }
+                uniqueProteinGroups[acc].add(input.id);
+            }
+        }
+
+        const vennSets = sampleInputs.map(input => ({
+            id: input.id.toString(),
+            label: input.name || `Muestra ${input.id}`,
+            size: allProteinGroups[input.id].size
+        }));
+
+        // Calculate overlaps
+        const allGroups = sampleInputs.map(input => input.id);
+        const combinations = getCombinations(allGroups);
+
+        for (const combo of combinations) {
+            let intersection = new Set(allProteinGroups[combo[0]]);
+            for (let i = 1; i < combo.length; i++) {
+                intersection = new Set([...intersection].filter(x => allProteinGroups[combo[i]].has(x)));
+            }
+            if (intersection.size > 0) {
+                const key = combo.join('-');
+                overlaps[key] = intersection;
+            }
+        }
+
+        const vennOverlaps = Object.entries(overlaps).map(([key, value]) => ({
+            sets: key.split('-').map(id => id.toString()),
+            size: value.size
+        }));
+
+        setVennData({ sets: vennSets, overlaps: vennOverlaps });
+
+        // Identify common proteins
+        let commonAccessions = new Set();
+        if (sampleInputs.length > 1) {
+            commonAccessions = new Set(allProteinGroups[sampleInputs[0].id]);
+            for (let i = 1; i < sampleInputs.length; i++) {
+                commonAccessions = new Set([...commonAccessions].filter(x => allProteinGroups[sampleInputs[i].id].has(x)));
+            }
+        }
+        const commonProteinsData = proteinDataArray.filter(p => commonAccessions.has(p.accession));
+        setCommonProteins(commonProteinsData);
+        setProteinsData(proteinDataArray);
+        setShowTables(true);
+
+        // Store data in Firestore
+        if (db && userId) {
+            const docRef = doc(db, `artifacts/${appId}/users/${userId}/proteinData/analysis`);
+            await setDoc(docRef, {
+                timestamp: new Date().toISOString(),
+                vennData: JSON.stringify(vennData),
+                commonProteins: JSON.stringify(commonProteinsData),
+                allProteins: JSON.stringify(proteinDataArray)
+            });
+            console.log("Datos guardados en Firestore.");
+        }
+    };
+
+    const getCombinations = (arr) => {
+        const result = [];
+        for (let i = 2; i <= arr.length; i++) {
+            const sub = getCombinationsK(arr, i);
+            result.push(...sub);
+        }
+        return result;
+    };
+
+    const getCombinationsK = (arr, k) => {
+        const result = [];
+        const f = (prefix, remaining) => {
+            if (prefix.length === k) {
+                result.push(prefix);
+                return;
+            }
+            for (let i = 0; i < remaining.length; i++) {
+                f(prefix.concat(remaining[i]), remaining.slice(i + 1));
+            }
+        };
+        f([], arr);
+        return result;
+    };
+
+    const copyToClipboard = (text) => {
+        const tempTextArea = document.createElement("textarea");
+        tempTextArea.value = text;
+        document.body.appendChild(tempTextArea);
+        tempTextArea.select();
+        try {
+            document.execCommand('copy');
+            setCopyMessage({ message: 'Texto copiado al portapapeles.', isError: false });
+        } catch (err) {
+            console.error('Error al copiar el texto: ', err);
+            setCopyMessage({ message: 'Error al copiar el texto.', isError: true });
+        }
+        document.body.removeChild(tempTextArea);
+        setTimeout(() => setCopyMessage(null), 3000);
+    };
+
+    const getUniqueProteins = (sampleId) => {
+        const uniqueSet = new Set(proteinsData.filter(p => p.sampleId === sampleId).map(p => p.accession));
+        const otherSamples = proteinsData.filter(p => p.sampleId !== sampleId);
+        otherSamples.forEach(p => uniqueSet.delete(p.accession));
+        return proteinsData.filter(p => uniqueSet.has(p.accession) && p.sampleId === sampleId);
+    };
+
+    const formatVennLabels = (data) => {
+        if (!data || !data.sets) return [];
+        return data.sets.map(set => ({ label: set.label, size: set.size }));
+    };
+
+    const getVennTooltipContent = (data, point) => {
+        if (!data || !point) return '';
+        if (point.sets) {
+            const intersectingAccessions = vennData.overlaps[point.sets.join('-')];
+            if (intersectingAccessions) {
+                const labels = point.sets.map(setId => vennData.sets.find(s => s.id === setId)?.label).join(' y ');
+                const proteinsList = Array.from(intersectingAccessions).map(acc => {
+                    const protein = proteinsData.find(p => p.accession === acc);
+                    return `<span class="font-semibold">${acc}</span>: ${protein?.description.split(' OS=')[0] || 'N/A'}`;
+                }).join('<br/>');
+                return `<span class="font-bold text-lg">${labels}</span><br/><br/>Proteínas (${intersectingAccessions.size}):<br/>${proteinsList}`;
+            }
+        }
+        if (point.label) {
+            const uniqueProteins = getUniqueProteins(parseInt(point.id));
+            const proteinsList = uniqueProteins.map(p => {
+                return `<span class="font-semibold">${p.accession}</span>: ${p.description.split(' OS=')[0] || 'N/A'}`;
+            }).join('<br/>');
+            return `<span class="font-bold text-lg">${point.label}</span><br/><br/>Proteínas Únicas (${point.size}):<br/>${proteinsList}`;
+        }
+        return '';
+    };
+    
+    // Function to handle showing the tooltip
+    const handleMouseEnter = (event, data, point) => {
+        const content = getVennTooltipContent(data, point);
+        setTooltip({
+            x: event.pageX,
+            y: event.pageY,
+            content: content
+        });
+    };
+    
+    // Function to handle hiding the tooltip
+    const handleMouseLeave = () => {
+        setTooltip(null);
+    };
+
+    return (
+        <div className="min-h-screen bg-gray-100 p-8 font-sans antialiased text-gray-800">
+            <h1 className="text-4xl font-bold text-center text-blue-800 mb-8">Análisis de Datos Proteómicos</h1>
+            <p className="text-center text-lg text-gray-600 mb-10 max-w-2xl mx-auto">
+                Una herramienta interactiva para analizar y comparar conjuntos de datos proteómicos de diferentes fuentes. 
+                <span className="block mt-2 font-semibold text-blue-700">Comienza subiendo tus archivos de péptidos y proteínas.</span>
             </p>
-            <div className="flex flex-col sm:flex-row space-y-4 sm:space-y-0 sm:space-x-4 mb-4">
-              <button
-                onClick={exportComparativeToCsv}
-                disabled={isExporting || comparativeTableRows.length === 0}
-                className="w-full py-3 px-6 bg-green-600 text-white font-bold rounded-2xl shadow-md hover:bg-green-700 transition-colors disabled:bg-green-300 disabled:cursor-not-allowed flex items-center justify-center space-x-2"
-              >
-                <span>{isExporting ? "Exportando..." : "Exportar Tabla Comparativa a Excel (CSV)"}</span>
-              </button>
-            </div>
-            <div id="comparative-results-table" className="overflow-x-auto rounded-xl shadow-inner border border-gray-200">
-              <table className="min-w-full divide-y divide-gray-200">
-                <thead className="bg-gray-50">
-                  <tr>
-                    {comparativeHeaders.map((header, index) => (
-                      <th key={index} className="px-4 sm:px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">{header}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody className="bg-white divide-y divide-gray-200">
-                  {comparativeTableRows.map((row, rowIndex) => (
-                    <tr key={rowIndex} className="hover:bg-gray-50 transition-colors">
-                      {row.map((cell, cellIndex) => (
-                        <td key={cellIndex} className={`px-4 sm:px-6 py-4 whitespace-normal text-sm ${cellIndex < 2 ? 'font-medium text-gray-900' : 'text-gray-700 font-mono'}`}>{cell}</td>
-                      ))}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        )}
 
-        {/* Custom Tooltip for Venn Diagram */}
-        {tooltip && (
-            <div
-                style={{
-                    position: 'absolute',
-                    left: tooltip.x,
-                    top: tooltip.y,
-                    pointerEvents: 'none', // Allow events to pass through to underlying elements
-                    zIndex: 1000,
-                    backgroundColor: 'rgba(0, 0, 0, 0.8)',
-                    color: 'white',
-                    padding: '8px 12px',
-                    borderRadius: '8px',
-                    fontSize: '0.85rem',
-                    maxWidth: '300px',
-                    lineHeight: '1.4',
-                    boxShadow: '0 4px 12px rgba(0,0,0,0.2)',
-                    backdropFilter: 'blur(5px)',
-                    WebkitBackdropFilter: 'blur(5px)'
-                }}
-                dangerouslySetInnerHTML={{ __html: tooltip.content }}
-            />
-        )}
+            <div className="bg-white p-8 rounded-2xl shadow-xl space-y-8 max-w-4xl mx-auto">
+                {sampleInputs.map(input => (
+                    <div key={input.id} className="border-b pb-6 border-gray-200 last:border-b-0">
+                        <div className="flex justify-between items-center mb-4">
+                            <h2 className="text-2xl font-semibold text-gray-700">Muestra {input.id}</h2>
+                            {sampleInputs.length > 1 && (
+                                <button
+                                    onClick={() => removeSampleInput(input.id)}
+                                    className="p-2 bg-red-500 text-white rounded-full hover:bg-red-600 transition-colors duration-200"
+                                >
+                                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5">
+                                        <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                                    </svg>
+                                </button>
+                            )}
+                        </div>
+                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                            <div className="col-span-1">
+                                <label className="block text-sm font-medium text-gray-700 mb-2">Nombre de la Muestra</label>
+                                <input
+                                    type="text"
+                                    value={input.name}
+                                    onChange={(e) => handleInputChange(e, input.id, 'name')}
+                                    placeholder={`Ej: Muestra ${input.id}`}
+                                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500"
+                                />
+                            </div>
+                            <div className="col-span-1">
+                                <label className="block text-sm font-medium text-gray-700 mb-2">Software de Origen</label>
+                                <select
+                                    value={input.sourceSoftware}
+                                    onChange={(e) => handleInputChange(e, input.id, 'sourceSoftware')}
+                                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500"
+                                >
+                                    <option value="Peaks Studio">Peaks Studio</option>
+                                    <option value="MaxQuant">MaxQuant</option>
+                                    <option value="Proteome Discoverer">Proteome Discoverer</option>
+                                </select>
+                            </div>
+                            <div className="col-span-1">
+                                <label className="block text-sm font-medium text-gray-700 mb-2">Archivo de Péptidos</label>
+                                <input
+                                    type="file"
+                                    accept=".txt, .csv"
+                                    onChange={(e) => handleFileChange(e, input.id, 'peptides')}
+                                    className="w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
+                                />
+                                {input.files.peptides && <p className="mt-2 text-xs text-gray-500 truncate">Archivo: {input.files.peptides.name}</p>}
+                            </div>
+                            <div className="col-span-1">
+                                <label className="block text-sm font-medium text-gray-700 mb-2">Archivo de Proteínas</label>
+                                <input
+                                    type="file"
+                                    accept=".txt, .csv"
+                                    onChange={(e) => handleFileChange(e, input.id, 'proteins')}
+                                    className="w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
+                                />
+                                {input.files.proteins && <p className="mt-2 text-xs text-gray-500 truncate">Archivo: {input.files.proteins.name}</p>}
+                            </div>
+                        </div>
+                    </div>
+                ))}
 
-        {/* Custom Copy Message */}
-        {copyMessage && (
-            <div className={`fixed bottom-4 right-4 p-3 rounded-lg shadow-lg text-white transition-opacity duration-300 ${copyMessage.isError ? 'bg-red-500' : 'bg-green-500'}`}>
-                {copyMessage.message}
+                <div className="flex justify-center space-x-4">
+                    <button
+                        onClick={addSampleInput}
+                        className="py-2 px-6 bg-green-500 text-white font-semibold rounded-full shadow-lg hover:bg-green-600 transition-transform duration-200 transform hover:scale-105"
+                    >
+                        + Agregar Muestra
+                    </button>
+                    <button
+                        onClick={processFiles}
+                        className="py-2 px-6 bg-blue-600 text-white font-semibold rounded-full shadow-lg hover:bg-blue-700 transition-transform duration-200 transform hover:scale-105"
+                    >
+                        Analizar Datos
+                    </button>
+                </div>
             </div>
-        )}
-      </div>
-    </div>
-  );
+
+            {showTables && (
+                <div className="mt-12 space-y-12">
+                    {/* Sección de Resumen y Diagrama de Venn */}
+                    <div className="bg-white p-8 rounded-2xl shadow-xl">
+                        <h2 className="text-3xl font-bold text-center text-blue-800 mb-6">Resumen del Análisis</h2>
+                        <div className="flex flex-col lg:flex-row items-center justify-center space-y-8 lg:space-y-0 lg:space-x-12">
+                            {/* Visualización del Diagrama de Venn (placeholder) */}
+                            <div className="relative w-full lg:w-1/2 flex items-center justify-center">
+                                <svg width="400" height="400" viewBox="0 0 400 400">
+                                    <text x="200" y="200" textAnchor="middle" className="text-lg font-semibold fill-gray-500">
+                                        Diagrama de Venn (Provisorio)
+                                    </text>
+                                    <circle cx="150" cy="150" r="100" fill="red" opacity="0.3" 
+                                        onMouseEnter={(e) => handleMouseEnter(e, vennData, vennData.sets[0])}
+                                        onMouseLeave={handleMouseLeave} />
+                                    <circle cx="250" cy="150" r="100" fill="blue" opacity="0.3" 
+                                        onMouseEnter={(e) => handleMouseEnter(e, vennData, vennData.sets[1])}
+                                        onMouseLeave={handleMouseLeave} />
+                                    <circle cx="200" cy="250" r="100" fill="green" opacity="0.3" 
+                                        onMouseEnter={(e) => handleMouseEnter(e, vennData, vennData.sets[2])}
+                                        onMouseLeave={handleMouseLeave} />
+                                </svg>
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Tabla de Proteínas Comunes */}
+                    <div className="bg-white p-8 rounded-2xl shadow-xl overflow-x-auto">
+                        <h3 className="text-2xl font-bold text-blue-700 mb-4">Proteínas Comunes a todas las muestras</h3>
+                        <table className="min-w-full divide-y divide-gray-200 rounded-lg overflow-hidden">
+                            <thead className="bg-gray-50">
+                                <tr>
+                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                        Acceso
+                                    </th>
+                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                        Descripción
+                                    </th>
+                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                        Asociación
+                                    </th>
+                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                        Péptidos Únicos
+                                    </th>
+                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                        <div className="flex items-center">
+                                            <span>Copiar</span>
+                                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-4 h-4 ml-1">
+                                                <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 17.25L12 21m0 0l-3.75-3.75M12 21V3" />
+                                            </svg>
+                                        </div>
+                                    </th>
+                                </tr>
+                            </thead>
+                            <tbody className="bg-white divide-y divide-gray-200">
+                                {commonProteins.map((protein, index) => (
+                                    <tr key={index} className="hover:bg-gray-100 transition-colors duration-200">
+                                        <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{protein.accession}</td>
+                                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{protein.description}</td>
+                                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{protein.diseaseAssociation}</td>
+                                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{protein.uniquePeptidesCount}</td>
+                                        <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
+                                            <button
+                                                onClick={() => copyToClipboard(protein.uniquePeptidesList)}
+                                                className="text-blue-600 hover:text-blue-900 transition-colors duration-200"
+                                            >
+                                                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5">
+                                                    <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 17.25L12 21m0 0l-3.75-3.75M12 21V3" />
+                                                </svg>
+                                            </button>
+                                        </td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            )}
+
+            {/* Custom Tooltip for Venn Diagram */}
+            {tooltip && (
+                <div
+                    style={{
+                        position: 'absolute',
+                        left: tooltip.x,
+                        top: tooltip.y,
+                        pointerEvents: 'none', // Allow events to pass through to underlying elements
+                        zIndex: 1000,
+                        backgroundColor: 'rgba(0, 0, 0, 0.8)',
+                        color: 'white',
+                        padding: '8px 12px',
+                        borderRadius: '8px',
+                        fontSize: '0.85rem',
+                        maxWidth: '300px',
+                        lineHeight: '1.4',
+                        boxShadow: '0 4px 12px rgba(0,0,0,0.2)',
+                        backdropFilter: 'blur(5px)',
+                        WebkitBackdropFilter: 'blur(5px)'
+                    }}
+                    dangerouslySetInnerHTML={{ __html: tooltip.content }}
+                />
+            )}
+
+            {/* Custom Copy Message */}
+            {copyMessage && (
+                <div className={`fixed bottom-4 right-4 p-3 rounded-lg shadow-lg text-white transition-opacity duration-300 ${copyMessage.isError ? 'bg-red-500' : 'bg-green-500'}`}>
+                    {copyMessage.message}
+                </div>
+            )}
+        </div>
+    );
 };
 
 export default App;
