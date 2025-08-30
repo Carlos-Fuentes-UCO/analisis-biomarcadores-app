@@ -644,17 +644,17 @@ const App = () => {
         ...peptide,
         Description: proteinInfo ? proteinInfo.Description : '',
         Accession: proteinInfo ? proteinInfo.Accession : '',
-        'Area IBIS_DDA_1': parseFloat(peptide['Area IBIS_DDA_1']) || 0,
+        'Area *': parseFloat(peptide['Area *']) || 0,
         '-10lgP': parseFloat(peptide['-10lgP']) || 0,
       };
     });
 
-    const totalArea = mergedData.reduce((sum, item) => sum + parseFloat(item['Area IBIS_DDA_1']), 0);
+    const totalArea = mergedData.reduce((sum, item) => sum + parseFloat(item['Area *']), 0);
     const normFactor = totalArea > 0 ? 1000000 / totalArea : 1;
     
     const normalizedData = mergedData.map(item => ({
       ...item,
-      'Area IBIS_DDA_1': parseFloat(item['Area IBIS_DDA_1']) * normFactor,
+      'Area *': parseFloat(item['Area *']) * normFactor,
     }));
 
     const proteinGroups = new Map();
@@ -699,7 +699,7 @@ const App = () => {
     const finalResultsFDU = pathogenicVariants.map(variant => {
       const peptidesForVariant = processedData.filter(p => p['Protein Accession'] === variant['Protein Accession']);
       const totalPeptides = peptidesForVariant.length;
-      const avgArea = totalPeptides > 0 ? peptidesForVariant.reduce((sum, p) => sum + parseFloat(p['Area IBIS_DDA_1']), 0) / totalPeptides : 0;
+      const avgArea = totalPeptides > 0 ? peptidesForVariant.reduce((sum, p) => sum + parseFloat(p['Area *']), 0) / totalPeptides : 0;
       // const proteinsInGroup = proteinGroups.get(variant['Protein Group']).size; // This isn't directly needed for FDU output
 
       return {
