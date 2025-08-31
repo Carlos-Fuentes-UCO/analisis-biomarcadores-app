@@ -1,562 +1,465 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useCallback, useMemo } from 'react';
 
-// Define regular expressions patterns for pathogenic variants
+// Regular expressions to find pathogenic variants and associations
 const pathogenicPattern = /(-VAR_)|(-[A-Z]\d+[A-Z])/;
+const associationPattern = /\| Association:(.*?)(?=\s*\||$)/;
+const clinicalSignificancePattern = /\| ClinicalSignificance:(.*?)(?=\s*\||$)/;
 
 /**
- * @typedef {object} ProteinData - Formato de Datos Unificado (FDU) para una proteína.
- * @property {string} accession - ID de acceso principal de la proteína (ej: "P12345").
- * @property {string} description - Descripción completa de la proteína (ej: "Vimentin OS=Homo sapiens...").
- * @property {string} proteinGroup - El ID del grupo de proteínas al que pertenece.
- * @property {number} area - El valor de área de la proteína para la muestra cargada.
- * @property {number} totalPeptides - Número total de péptidos identificados para esta proteína.
- * @property {number} uniquePeptidesCount - Número de péptidos únicos.
- * @property {string[]} uniquePeptides - Lista de secuencias de péptidos únicos.
- * @property {string} sampleName - El nombre de la muestra de donde proviene la proteína.
- * @property {string} diseaseAssociation - Asociación de enfermedad extraída de la descripción.
+ * Helper function to dynamically find column indices from the header row.
+ * @param {string} headerRow The raw header line from the file.
+ * @param {string[]} columnsToFind An array of column names to find.
+ * @returns {Object.<string, number>} An object mapping column names to their 0-based index.
  */
+const getColumnIndices = (headerRow, columnsToFind) => {
+  const headers = headerRow.split('\t').map(h => h.replace(/"/g, '').trim().toLowerCase());
+  const indices = {};
+  columnsToFind.forEach(col => {
+    indices[col] = headers.findIndex(h => h.includes(col.toLowerCase()));
+  });
+  return indices;
+};
 
-// Main application component
+/**
+ * A robust line parser that handles tabs within double-quoted fields.
+ * @param {string} line The raw line from the file.
+ * @returns {string[]} An array of columns.
+ */
+const parseLine = (line) => {
+  // Regex to split by tab, but only if the tab is not inside double quotes.
+  const regex = /\t(?=(?:[^"]*"[^"]*")*[^"]*$)/;
+  return line.split(regex).map(col => col.replace(/"/g, '').trim());
+};
+
 const App = () => {
-  // State to manage multiple file input sets
   const [sampleInputs, setSampleInputs] = useState([{ id: 1, name: '', sourceSoftware: 'Peaks Studio', files: { peptides: null, proteins: null } }]);
+  const [fastaFile, setFastaFile] = useState(null);
+  const [fastaIds, setFastaIds] = useState(null);
   const [processedData, setProcessedData] = useState([]);
-  const [error, setError] = useState('');
+  const [error, setError] = useState(null);
   const [loading, setLoading] = useState(false);
-  const [minArea, setMinArea] = useState(0);
-  const [minPeptides, setMinPeptides] = useState(0);
-  const [minUniquePeptides, setMinUniquePeptides] = useState(0);
-  const [canonicalIds, setCanonicalIds] = useState('');
-  const [filterPathogenic, setFilterPathogenic] = useState(false);
-  const [copyMessage, setCopyMessage] = useState(null);
+  const [searchTerm, setSearchTerm] = useState('');
+  const [minTotalPeptides, setMinTotalPeptides] = useState('');
+  const [minArea, setMinArea] = useState('');
+  const [minUniquePeptides, setMinUniquePeptides] = useState('');
+  const [manualFastaIdsText, setManualFastaIdsText] = useState('');
   const [expandedRow, setExpandedRow] = useState(null);
-  const [idFile, setIdFile] = useState(null);
+  const [showUnitaryGroupsOnly, setShowUnitaryGroupsOnly] = useState(false);
 
-  // References for drag-and-drop
-  const dragCounter = useRef(0);
-
-  // Helper to parse CSV data
-  const parseCSV = (text) => {
-    const lines = text.trim().split('\n');
-    const headers = lines[0].split('\t').map(h => h.trim());
-    return lines.slice(1).map(line => {
-      const values = line.split('\t');
-      return headers.reduce((acc, header, i) => {
-        acc[header] = values[i];
-        return acc;
-      }, {});
-    });
+  const handleFileChange = (e, id, fileType) => {
+    const file = e.target.files[0];
+    setSampleInputs(prevInputs => prevInputs.map(input =>
+      input.id === id ? { ...input, files: { ...input.files, [fileType]: file } } : input
+    ));
   };
 
-  // Function to extract disease association
-  const extractDiseaseAssociation = (description) => {
-      const associationMatch = description.match(/Association:([^|]+)/);
-      if (associationMatch && associationMatch[1]) {
-          return associationMatch[1].trim();
-      }
-      const clinicalMatch = description.match(/ClinicalSignificance:([^|]+)/);
-      if (clinicalMatch && clinicalMatch[1]) {
-          return clinicalMatch[1].trim();
-      }
-      return 'N/A';
+  const handleNameChange = (e, id) => {
+    const { value } = e.target;
+    setSampleInputs(prevInputs => prevInputs.map(input =>
+      input.id === id ? { ...input, name: value } : input
+    ));
   };
 
-  // Function to process and unify data from multiple files
-  const processData = async () => {
+  const addSampleInput = () => {
+    const newId = sampleInputs.length ? Math.max(...sampleInputs.map(s => s.id)) + 1 : 1;
+    setSampleInputs([...sampleInputs, { id: newId, name: '', sourceSoftware: 'Peaks Studio', files: { peptides: null, proteins: null } }]);
+  };
+
+  const handleRemoveInput = (id) => {
+    if (sampleInputs.length > 1) {
+      setSampleInputs(sampleInputs.filter(input => input.id !== id));
+    }
+  };
+
+  const processData = useCallback(async () => {
+    setError(null);
     setLoading(true);
-    setError('');
-    let allProcessedEntries = [];
+    setProcessedData([]);
+    setFastaIds(null);
 
-    // Map to store unique peptides for each protein accession
-    const uniquePeptidesMap = new Map();
-
-    for (const sample of sampleInputs) {
-      if (sample.files.peptides) {
-        try {
-          const peptidesContent = await sample.files.peptides.text();
-          const peptidesData = parseCSV(peptidesContent);
-          peptidesData.forEach(peptide => {
-            const accession = peptide['Protein Accession'] || peptide['Protein ID'] || '';
-            const isUnique = peptide['Unique'] === 'Y';
-            const peptideSequence = peptide['Peptide'] || '';
-            if (isUnique && accession && peptideSequence) {
-              if (!uniquePeptidesMap.has(accession)) {
-                uniquePeptidesMap.set(accession, new Set());
-              }
-              uniquePeptidesMap.get(accession).add(peptideSequence);
+    try {
+      let parsedFastaIds = null;
+      if (fastaFile) {
+        const fastaText = await fastaFile.text();
+        const ids = new Set();
+        const lines = fastaText.split('\n');
+        for (const line of lines) {
+          if (line.startsWith('>')) {
+            const parts = line.substring(1).split('|');
+            if (parts.length > 1) {
+              ids.add(parts[1].trim());
+            } else {
+              ids.add(parts[0].trim());
             }
-          });
-        } catch (err) {
-          console.error('Error al procesar el archivo de péptidos:', err);
-          // Don't halt, just log the error and continue
+          }
+        }
+        parsedFastaIds = ids;
+      }
+
+      const parsedManualIds = new Set();
+      if (manualFastaIdsText.trim()) {
+        const idsArray = manualFastaIdsText.split(/[\s,;]+/).map(id => id.trim()).filter(id => id.length > 0);
+        idsArray.forEach(id => parsedManualIds.add(id));
+      }
+
+      let combinedFastaIds = null;
+      if (parsedFastaIds || parsedManualIds.size > 0) {
+        combinedFastaIds = new Set();
+        if (parsedFastaIds) {
+          parsedFastaIds.forEach(id => combinedFastaIds.add(id));
+        }
+        if (parsedManualIds.size > 0) {
+          parsedManualIds.forEach(id => combinedFastaIds.add(id));
         }
       }
+      setFastaIds(combinedFastaIds);
+      
+      const allProteins = [];
+      const allPeptides = new Map();
+      const sampleGroupCounts = new Map();
 
-      if (sample.files.proteins) {
-        try {
-          const proteinsContent = await sample.files.proteins.text();
-          const proteinData = parseCSV(proteinsContent);
-          
-          proteinData.forEach(protein => {
-            const accession = protein['Accession'] || protein['Protein Accession'] || '';
-            const description = protein['Description'] || '';
-            const proteinGroup = protein['Protein Group'] || '';
-            const areaKey = Object.keys(protein).find(key => key.includes('Area'));
-            const area = areaKey ? parseFloat(protein[areaKey].replace(/,/g, '')) : 0;
-            const totalPeptides = parseInt(protein['#Peptides'], 10) || 0;
-            const uniquePeptidesCount = parseInt(protein['#Unique'], 10) || 0;
-            const uniquePeptides = Array.from(uniquePeptidesMap.get(accession) || []);
-            const diseaseAssociation = extractDiseaseAssociation(description);
+      for (const sample of sampleInputs) {
+        if (!sample.name || !sample.files.peptides || !sample.files.proteins) {
+          setError(`Missing information for sample ${sample.id}. Ensure the name and both files are uploaded.`);
+          setLoading(false);
+          return;
+        }
 
-            allProcessedEntries.push({
+        const peptidesText = await sample.files.peptides.text();
+        const proteinsText = await sample.files.proteins.text();
+
+        const peptidesLines = peptidesText.split('\n').filter(line => line.trim() !== '');
+        const proteinsLines = proteinsText.split('\n').filter(line => line.trim() !== '');
+
+        if (peptidesLines.length < 2 || proteinsLines.length < 2) {
+          setError(`Error: Files for sample ${sample.name} are empty or the format is incorrect.`);
+          setLoading(false);
+          return;
+        }
+
+        const proteinsHeader = proteinsLines[0];
+        const peptidesHeader = peptidesLines[0];
+
+        const proteinsIndices = getColumnIndices(proteinsHeader, ['Accession', 'Protein Group', 'Area', '#Peptides', 'Description']);
+        const peptidesIndices = getColumnIndices(peptidesHeader, ['Protein Accession', 'Peptide']);
+        
+        const missingProteinsCols = Object.entries(proteinsIndices).filter(([key, val]) => val === -1).map(([key]) => key);
+        if (missingProteinsCols.length > 0) {
+          setError(`Error: Protein file for sample '${sample.name}' does not contain the required columns: ${missingProteinsCols.join(', ')}.`);
+          setLoading(false);
+          return;
+        }
+
+        const missingPeptidesCols = Object.entries(peptidesIndices).filter(([key, val]) => val === -1).map(([key]) => key);
+        if (missingPeptidesCols.length > 0) {
+          setError(`Error: Peptide file for sample '${sample.name}' does not contain the required columns: ${missingPeptidesCols.join(', ')}.`);
+          setLoading(false);
+          return;
+        }
+
+        peptidesLines.slice(1).forEach(row => {
+          const columns = row.split('\t');
+          const peptideSequence = columns[peptidesIndices['Peptide']] || 'N/A';
+          const proteinAccessionFull = columns[peptidesIndices['Protein Accession']] || '';
+          const proteinAccession = proteinAccessionFull.split('|').length > 1 ? proteinAccessionFull.split('|')[1] : proteinAccessionFull;
+
+          if (proteinAccession) {
+            const peptideId = `${sample.name}-${proteinAccession}`;
+            if (!allPeptides.has(peptideId)) {
+                allPeptides.set(peptideId, new Set());
+            }
+            allPeptides.get(peptideId).add(peptideSequence);
+          }
+        });
+
+        const parsedProteinsForThisSample = [];
+        proteinsLines.slice(1).forEach(row => {
+            const columns = parseLine(row);
+            const accessionFull = columns[proteinsIndices['Accession']] || '';
+            const accession = accessionFull.split('|').length > 1 ? accessionFull.split('|')[1] : accessionFull;
+            const proteinGroup = columns[proteinsIndices['Protein Group']] || 'N/A';
+            const area = parseFloat(columns[proteinsIndices['Area']]) || 0;
+            const totalPeptides = parseInt(columns[proteinsIndices['#Peptides']], 10) || 0;
+            
+            const description = (columns[proteinsIndices['Description']] || '').replace(/"/g, '').trim();
+            
+            let diseaseAssociation = 'N/A';
+            const associationMatch = description.match(associationPattern);
+            const clinicalSignificanceMatch = description.match(clinicalSignificancePattern);
+            const associations = [];
+            if (associationMatch && associationMatch[1]) {
+                associations.push(associationMatch[1].trim());
+            }
+            if (clinicalSignificanceMatch && clinicalSignificanceMatch[1]) {
+                associations.push(clinicalSignificanceMatch[1].trim());
+            }
+            if (associations.length > 0) {
+                diseaseAssociation = associations.join('; ');
+            } else if (description.toUpperCase().includes('PATHOGENIC_VARIANT')) {
+                diseaseAssociation = 'PATHOGENIC_VARIANT';
+            } else if (description.match(pathogenicPattern)) {
+                diseaseAssociation = 'Pathogenic/Variant';
+            } else if (description.toLowerCase().includes('cancer')) {
+                diseaseAssociation = 'Cancer';
+            }
+  
+            const uniquePeptidesForProtein = Array.from(allPeptides.get(`${sample.name}-${accession}`) || []);
+            const uniquePeptidesCount = uniquePeptidesForProtein.length;
+  
+            parsedProteinsForThisSample.push({
               accession,
               description,
               proteinGroup,
               area,
               totalPeptides,
               uniquePeptidesCount,
-              uniquePeptides, // Add the unique peptides list
-              sampleName: sample.name || `Muestra ${sample.id}`, // Add the sample name
-              diseaseAssociation, // Add the extracted disease association
+              uniquePeptides: uniquePeptidesForProtein,
+              sampleName: sample.name,
+              diseaseAssociation
             });
-          });
-        } catch (err) {
-          console.error(err);
-          setError('Error al procesar el archivo de proteínas. Asegúrate de que el formato sea correcto.');
-          setLoading(false);
-          return;
-        }
-      }
-    }
-
-    // Aplicar filtros
-    let filteredData = allProcessedEntries;
-    
-    if (filterPathogenic) {
-        filteredData = filteredData.filter(protein => 
-            (protein.accession && protein.accession.includes('PATHOGENIC_VARIANT')) ||
-            (protein.description && protein.description.includes('PATHOGENIC_VARIANT'))
-        );
-    }
-    
-    if (minArea > 0) {
-      filteredData = filteredData.filter(d => d.area >= minArea);
-    }
-
-    if (minPeptides > 0) {
-      filteredData = filteredData.filter(d => d.totalPeptides >= minPeptides);
-    }
-    
-    if (minUniquePeptides > 0) {
-        filteredData = filteredData.filter(d => d.uniquePeptidesCount >= minUniquePeptides);
-    }
-    
-    if (canonicalIds) {
-        const idList = canonicalIds.split(',').map(id => id.trim().toLowerCase()).filter(id => id !== '');
-        filteredData = filteredData.filter(d => 
-            idList.some(id => d.accession.toLowerCase().includes(id) || d.proteinGroup.toLowerCase().includes(id))
-        );
-    }
-
-    setProcessedData(filteredData);
-    setLoading(false);
-  };
-  
-  useEffect(() => {
-    processData();
-  }, [sampleInputs, minArea, minPeptides, minUniquePeptides, canonicalIds, filterPathogenic]);
-
-
-  // Handlers for file input changes
-  const handleFileChange = (e, id, type) => {
-    const file = e.target.files[0];
-    setSampleInputs(prevInputs =>
-      prevInputs.map(input =>
-        input.id === id ? { ...input, files: { ...input.files, [type]: file } } : input
-      )
-    );
-  };
-
-  const handleNameChange = (e, id) => {
-    const name = e.target.value;
-    setSampleInputs(prevInputs =>
-      prevInputs.map(input =>
-        input.id === id ? { ...input, name } : input
-      )
-    );
-  };
-
-  const handleIdFileChange = (e) => {
-    setIdFile(e.target.files[0]);
-  };
-  
-  // New function to handle loading IDs from the file
-  const handleLoadIdsFromFile = async () => {
-    if (!idFile) {
-        setError('Por favor, selecciona un archivo de IDs primero.');
-        return;
-    }
-
-    try {
-        setLoading(true);
-        const fileContent = await idFile.text();
-        const regex = /\|([^|]+)\|/g; // Regex to find text between pipes
-        const matches = [...fileContent.matchAll(regex)];
-        const ids = matches.map(match => match[1]).join(', '); // Join with a comma for the input field
-        setCanonicalIds(ids);
-        setLoading(false);
-        setError('');
-    } catch (err) {
-        setError('Error al leer el archivo de IDs. Asegúrate de que el formato sea correcto.');
-        setLoading(false);
-    }
-  };
-
-  const addSampleInput = () => {
-    const newId = sampleInputs.length ? Math.max(...sampleInputs.map(s => s.id)) + 1 : 1;
-    setSampleInputs(prevInputs => [...prevInputs, { id: newId, name: '', sourceSoftware: 'Peaks Studio', files: { peptides: null, proteins: null } }]);
-  };
-
-  const removeSampleInput = (id) => {
-    setSampleInputs(prevInputs => prevInputs.filter(input => input.id !== id));
-  };
-  
-  // Handlers for drag-and-drop
-  const handleDragEnter = (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    dragCounter.current++;
-  };
-
-  const handleDragLeave = (e) => {
-    e.stopPropagation();
-    dragCounter.current--;
-  };
-
-  const handleDrop = (e, id) => {
-    e.preventDefault();
-    e.stopPropagation();
-    dragCounter.current = 0;
-    
-    const files = Array.from(e.dataTransfer.files);
-    
-    if (files.length > 0) {
-        const peptidesFile = files.find(file => file.name.includes('peptides'));
-        const proteinsFile = files.find(file => file.name.includes('proteins'));
-        
-        setSampleInputs(prevInputs =>
-            prevInputs.map(input =>
-                input.id === id
-                ? {
-                    ...input,
-                    files: {
-                        peptides: peptidesFile || input.files.peptides,
-                        proteins: proteinsFile || input.files.proteins,
-                    }
-                }
-                : input
-            )
-        );
-    }
-  };
-  
-  const handleCopyTable = () => {
-    const table = document.getElementById('protein-table');
-    if (table) {
-        let text = '';
-        const rows = table.querySelectorAll('tr');
-        rows.forEach(row => {
-            const cells = row.querySelectorAll('th, td');
-            cells.forEach((cell, index) => {
-                text += cell.innerText + (index < cells.length - 1 ? '\t' : '');
-            });
-            text += '\n';
         });
 
-        const textarea = document.createElement('textarea');
-        textarea.value = text;
-        document.body.appendChild(textarea);
-        textarea.select();
-        try {
-            document.execCommand('copy');
-            setCopyMessage({ message: '¡Tabla copiada al portapapeles!', isError: false });
-        } catch (err) {
-            setCopyMessage({ message: 'Error al copiar la tabla.', isError: true });
+        // Count protein groups per sample
+        if (!sampleGroupCounts.has(sample.name)) {
+            sampleGroupCounts.set(sample.name, new Map());
         }
-        document.body.removeChild(textarea);
+        const currentSampleCounts = sampleGroupCounts.get(sample.name);
+        parsedProteinsForThisSample.forEach(protein => {
+            currentSampleCounts.set(protein.proteinGroup, (currentSampleCounts.get(protein.proteinGroup) || 0) + 1);
+        });
 
-        setTimeout(() => setCopyMessage(null), 3000);
+        allProteins.push(...parsedProteinsForThisSample);
+      }
+      
+      const finalProteins = allProteins.map(protein => ({
+          ...protein,
+          // Now we check the specific sample's group count
+          isUnitaryGroup: sampleGroupCounts.get(protein.sampleName)?.get(protein.proteinGroup) === 1
+      }));
+
+      setProcessedData(finalProteins);
+
+    } catch (err) {
+      console.error('Error processing files:', err);
+      setError(`Error processing files. Please ensure the format is correct. Details: ${err.message}`);
+    } finally {
+      setLoading(false);
     }
-  };
+  }, [sampleInputs, fastaFile, manualFastaIdsText]);
 
-  const toggleExpand = (index) => {
+  const filteredData = useMemo(() => {
+    let currentData = processedData;
+
+    if (fastaIds && fastaIds.size > 0) {
+        currentData = currentData.filter(protein => {
+          const baseAccession = protein.accession.split('-')[0];
+          return fastaIds.has(baseAccession);
+        });
+    }
+    
+    const parsedMinTotalPeptides = parseInt(minTotalPeptides, 10);
+    if (!isNaN(parsedMinTotalPeptides)) {
+        currentData = currentData.filter(protein => protein.totalPeptides >= parsedMinTotalPeptides);
+    }
+    
+    const parsedMinArea = parseFloat(minArea);
+    if (!isNaN(parsedMinArea)) {
+        currentData = currentData.filter(protein => protein.area >= parsedMinArea);
+    }
+    
+    const parsedMinUniquePeptides = parseInt(minUniquePeptides, 10);
+    if (!isNaN(parsedMinUniquePeptides)) {
+        currentData = currentData.filter(protein => protein.uniquePeptidesCount >= parsedMinUniquePeptides);
+    }
+
+    if (showUnitaryGroupsOnly) {
+        currentData = currentData.filter(protein => protein.isUnitaryGroup);
+    }
+
+    return currentData.filter(protein =>
+      protein.accession.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      protein.description.toLowerCase().includes(searchTerm.toLowerCase())
+    );
+  }, [processedData, fastaIds, searchTerm, minTotalPeptides, minArea, minUniquePeptides, showUnitaryGroupsOnly]);
+
+  const toggleRow = (index) => {
     setExpandedRow(expandedRow === index ? null : index);
+  };
+  
+  const handleExportToTxt = () => {
+    if (filteredData.length === 0) {
+      setError('No data to export. Please ensure the table contains results.');
+      return;
+    }
+  
+    // Define the headers for the output file
+    const headers = ['Accession ID', 'Description', 'Sample', 'Association', 'Unitary Group', 'Area', 'Total Peptides', 'Unique Peptides'];
+    
+    // Map the filtered data to a tab-separated string
+    const rows = filteredData.map(protein => {
+      return [
+        protein.accession,
+        protein.description,
+        protein.sampleName,
+        protein.diseaseAssociation,
+        protein.isUnitaryGroup ? 'Yes' : 'No',
+        protein.area.toFixed(2),
+        protein.totalPeptides,
+        protein.uniquePeptidesCount,
+      ].join('\t');
+    });
+  
+    // Combine headers and rows
+    const fileContent = [headers.join('\t'), ...rows].join('\n');
+    
+    // Create a Blob and download it
+    const blob = new Blob([fileContent], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'filtered_proteins.txt';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   };
 
   return (
-    <div className="min-h-screen bg-gray-100 dark:bg-gray-900 p-8 flex flex-col items-center font-sans text-gray-800 dark:text-gray-200">
-      <style>{`
-        body {
-          font-family: 'Inter', sans-serif;
-        }
-        tr.expanded-row td {
-            background-color: #f3f4f6;
-            border-top: 1px solid #e5e7eb;
-            border-bottom: 1px solid #e5e7eb;
-        }
-        .dark tr.expanded-row td {
-            background-color: #1f2937;
-            border-top: 1px solid #374151;
-            border-bottom: 1px solid #374151;
-        }
-      `}</style>
-      <div className="w-full max-w-6xl bg-white dark:bg-gray-800 rounded-2xl shadow-xl p-8 transition-colors duration-300">
-        <h1 className="text-4xl font-extrabold text-center text-indigo-600 dark:text-indigo-400 mb-6">
-          Análisis de Datos Proteómicos
-        </h1>
-        <p className="text-center text-lg mb-8 text-gray-600 dark:text-gray-400">
-          Carga tus archivos de péptidos y proteínas para un análisis unificado.
-        </p>
+    <div className="bg-gray-100 min-h-screen py-8 font-sans">
+      <div className="container mx-auto px-4 max-w-7xl">
+        {/* Header */}
+        <header className="text-center mb-12">
+          <h1 className="text-4xl font-bold text-gray-800 mb-2">Pathogenic Variants Analysis</h1>
+          <p className="text-lg text-gray-600">Unify, analyze, and visualize protein and peptide data from different samples.</p>
+        </header>
 
-        {/* File Upload Section */}
-        <div className="space-y-6 mb-8">
-          {sampleInputs.map((sample, index) => (
-            <div 
-              key={sample.id} 
-              className="bg-gray-50 dark:bg-gray-700 p-6 rounded-xl border-2 border-dashed border-gray-300 dark:border-gray-600 flex flex-col md:flex-row items-start md:items-center justify-between transition-colors duration-300"
-              onDragEnter={handleDragEnter}
-              onDragLeave={handleDragLeave}
-              onDragOver={e => e.preventDefault()}
-              onDrop={e => handleDrop(e, sample.id)}
-            >
-              <div className="flex-1 w-full">
-                <div className="mb-4">
-                  <h3 className="text-xl font-bold text-gray-700 dark:text-gray-300">
-                    Muestra {sample.id}
-                  </h3>
-                  <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
-                    Arrastra y suelta tus archivos aquí, o haz clic para seleccionarlos.
-                  </p>
-                </div>
-                <div className="mb-4">
-                  <label htmlFor={`sample-name-${sample.id}`} className="block text-sm font-medium text-gray-700 dark:text-gray-300">
-                    Nombre de la Muestra:
-                  </label>
-                  <input
-                    id={`sample-name-${sample.id}`}
-                    type="text"
-                    value={sample.name}
-                    onChange={(e) => handleNameChange(e, sample.id)}
-                    className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-300 focus:ring focus:ring-indigo-200 focus:ring-opacity-50 dark:bg-gray-800 dark:border-gray-600 dark:text-gray-100 p-2"
-                    placeholder={`Muestra ${sample.id}`}
-                  />
-                </div>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">
-                      Archivo de Péptidos:
-                    </label>
-                    <input
-                      type="file"
-                      className="mt-1 w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100"
-                      onChange={(e) => handleFileChange(e, sample.id, 'peptides')}
-                    />
-                    {sample.files.peptides && <p className="text-xs text-green-500 mt-1">Cargado: {sample.files.peptides.name}</p>}
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">
-                      Archivo de Proteínas:
-                    </label>
-                    <input
-                      type="file"
-                      className="mt-1 w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100"
-                      onChange={(e) => handleFileChange(e, sample.id, 'proteins')}
-                    />
-                    {sample.files.proteins && <p className="text-xs text-green-500 mt-1">Cargado: {sample.files.proteins.name}</p>}
-                  </div>
-                </div>
-              </div>
-              {sampleInputs.length > 1 && (
-                <button 
-                  onClick={() => removeSampleInput(sample.id)}
-                  className="mt-4 md:mt-0 md:ml-4 p-2 bg-red-500 text-white rounded-full hover:bg-red-600 transition-colors duration-200"
-                >
-                  <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
-                    <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" />
-                  </svg>
-                </button>
-              )}
+        {/* FASTA Upload Section */}
+        <div className="bg-white p-6 rounded-xl shadow-lg mb-8 border border-gray-200">
+          <h2 className="text-2xl font-semibold text-gray-700 mb-4">Step 1: Optional - Filter by Protein IDs</h2>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div className="flex flex-col">
+              <label className="text-gray-600 font-medium mb-2">Upload your FASTA file:</label>
+              <input type="file" accept=".fasta,.txt" onChange={(e) => setFastaFile(e.target.files[0])} className="text-gray-700 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-violet-50 file:text-violet-700 hover:file:bg-violet-100 transition duration-200" />
+              {fastaFile && <p className="mt-2 text-sm text-gray-500">File selected: <span className="font-medium text-gray-700">{fastaFile.name}</span></p>}
             </div>
-          ))}
-          <button 
-            onClick={addSampleInput} 
-            className="w-full py-3 bg-indigo-500 text-white font-bold rounded-xl shadow-lg hover:bg-indigo-600 transition-transform transform hover:-translate-y-1 duration-200"
-          >
-            Añadir Muestra
-          </button>
+            <div className="flex flex-col">
+              <label className="text-gray-600 font-medium mb-2">Or enter IDs manually (comma or space separated):</label>
+              <textarea rows="4" value={manualFastaIdsText} onChange={(e) => setManualFastaIdsText(e.target.value)} placeholder="e.g. P01234, Q56789" className="p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition duration-200 resize-none"></textarea>
+            </div>
+          </div>
         </div>
 
-        {/* Filter and Action Section */}
-        <div className="bg-gray-100 dark:bg-gray-700 p-6 rounded-xl shadow-inner mb-8 transition-colors duration-300">
-          <h2 className="text-2xl font-bold text-gray-700 dark:text-gray-300 mb-4">Opciones de Filtro</h2>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div>
-              <label htmlFor="area" className="block text-sm font-medium text-gray-700 dark:text-gray-300">Área Mínima:</label>
-              <input
-                id="area"
-                type="number"
-                value={minArea}
-                onChange={(e) => setMinArea(e.target.value)}
-                className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-300 focus:ring focus:ring-indigo-200 focus:ring-opacity-50 dark:bg-gray-800 dark:border-gray-600 dark:text-gray-100 p-2"
-                placeholder="0"
-              />
-            </div>
-            <div>
-              <label htmlFor="peptides" className="block text-sm font-medium text-gray-700 dark:text-gray-300">Péptidos Totales Mínimos:</label>
-              <input
-                id="peptides"
-                type="number"
-                value={minPeptides}
-                onChange={(e) => setMinPeptides(e.target.value)}
-                className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-300 focus:ring focus:ring-indigo-200 focus:ring-opacity-50 dark:bg-gray-800 dark:border-gray-600 dark:text-gray-100 p-2"
-                placeholder="0"
-              />
-            </div>
-            <div>
-              <label htmlFor="unique-peptides" className="block text-sm font-medium text-gray-700 dark:text-gray-300">Péptidos Únicos Mínimos:</label>
-              <input
-                id="unique-peptides"
-                type="number"
-                value={minUniquePeptides}
-                onChange={(e) => setMinUniquePeptides(e.target.value)}
-                className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-300 focus:ring focus:ring-indigo-200 focus:ring-opacity-50 dark:bg-gray-800 dark:border-gray-600 dark:text-gray-100 p-2"
-                placeholder="0"
-              />
-            </div>
-            <div className="flex items-center mt-6">
-                <input
-                    type="checkbox"
-                    id="pathogenic-filter"
-                    checked={filterPathogenic}
-                    onChange={(e) => setFilterPathogenic(e.target.checked)}
-                    className="h-5 w-5 text-indigo-600 rounded-md border-gray-300 focus:ring-indigo-500 dark:bg-gray-800 dark:border-gray-600 dark:text-indigo-400"
-                />
-                <label htmlFor="pathogenic-filter" className="ml-2 block text-sm font-medium text-gray-700 dark:text-gray-300">
-                    Filtrar por 'PATHOGENIC_VARIANT'
-                </label>
-            </div>
+        {/* Sample File Upload Section */}
+        <div className="bg-white p-6 rounded-xl shadow-lg mb-8 border border-gray-200">
+          <h2 className="text-2xl font-semibold text-gray-700 mb-4">Step 2: Upload Sample Files</h2>
+          <div className="space-y-6">
+            {sampleInputs.map((sample) => (
+              <div key={sample.id} className="relative p-4 border border-gray-300 rounded-lg bg-gray-50 flex flex-col space-y-3">
+                <input type="text" value={sample.name} onChange={(e) => handleNameChange(e, sample.id)} placeholder={`Sample Name ${sample.id}`} className="p-2 border border-gray-300 rounded-lg text-gray-700 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition duration-200" />
+                <div className="flex flex-col md:flex-row md:space-x-4 space-y-3 md:space-y-0">
+                  <div className="flex-1">
+                    <label className="block text-gray-600 text-sm mb-1">Peptide File:</label>
+                    <input type="file" accept=".txt" onChange={(e) => handleFileChange(e, sample.id, 'peptides')} className="text-gray-700 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-gray-200 hover:file:bg-gray-300 transition duration-200 w-full" />
+                    <small className="mt-1 block text-gray-500 text-xs truncate">{sample.files.peptides?.name || 'Not selected'}</small>
+                  </div>
+                  <div className="flex-1">
+                    <label className="block text-gray-600 text-sm mb-1">Protein File:</label>
+                    <input type="file" accept=".txt" onChange={(e) => handleFileChange(e, sample.id, 'proteins')} className="text-gray-700 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-gray-200 hover:file:bg-gray-300 transition duration-200 w-full" />
+                    <small className="mt-1 block text-gray-500 text-xs truncate">{sample.files.proteins?.name || 'Not selected'}</small>
+                  </div>
+                </div>
+                {sampleInputs.length > 1 && (
+                  <button onClick={() => handleRemoveInput(sample.id)} className="absolute top-2 right-2 text-red-500 hover:text-red-700 transition duration-200 rounded-full w-6 h-6 flex items-center justify-center">
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                      <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" />
+                    </svg>
+                  </button>
+                )}
+              </div>
+            ))}
           </div>
-
-          <div className="mt-6">
-            <label htmlFor="id-file" className="block text-sm font-medium text-gray-700 dark:text-gray-300">
-                Cargar archivo de IDs (FASTA/TXT):
-            </label>
-            <div className="flex items-center space-x-4 mt-1">
-                <input
-                  id="id-file"
-                  type="file"
-                  onChange={handleIdFileChange}
-                  className="w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100"
-                />
-                <button
-                  onClick={handleLoadIdsFromFile}
-                  className="py-2 px-4 bg-indigo-500 text-white rounded-xl shadow-lg hover:bg-indigo-600 transition-transform transform hover:-translate-y-1 duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
-                  disabled={loading || !idFile}
-                >
-                  {loading ? 'Cargando...' : 'Cargar IDs del Archivo'}
-                </button>
-            </div>
-            {idFile && <p className="text-xs text-green-500 mt-1">Cargado: {idFile.name}</p>}
-          </div>
-
-          <div className="mt-6">
-              <label htmlFor="canonical-ids" className="block text-sm font-medium text-gray-700 dark:text-gray-300">Buscar IDs Canónicas (separadas por comas):</label>
-              <textarea
-                id="canonical-ids"
-                rows="3"
-                value={canonicalIds}
-                onChange={(e) => setCanonicalIds(e.target.value)}
-                className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-300 focus:ring focus:ring-indigo-200 focus:ring-opacity-50 dark:bg-gray-800 dark:border-gray-600 dark:text-gray-100 p-2"
-                placeholder="Ej: P0DJI8, P02766"
-              />
-          </div>
-
-          <div className="mt-6 flex justify-center">
-            <button
-              onClick={processData}
-              className="py-3 px-8 bg-green-500 text-white font-bold rounded-xl shadow-lg hover:bg-green-600 transition-transform transform hover:-translate-y-1 duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
-              disabled={loading}
-            >
-              {loading ? 'Procesando...' : 'Analizar Datos'}
+          <div className="flex space-x-4 mt-6">
+            <button onClick={addSampleInput} className="bg-gray-200 text-gray-700 font-semibold py-2 px-6 rounded-full shadow-md hover:bg-gray-300 transition duration-200 ease-in-out transform hover:scale-105">
+              Add Another Sample
+            </button>
+            <button onClick={processData} disabled={loading} className="bg-blue-600 text-white font-semibold py-2 px-6 rounded-full shadow-lg hover:bg-blue-700 transition duration-200 ease-in-out transform hover:scale-105 disabled:bg-blue-400">
+              {loading ? 'Processing...' : 'Analyze Files'}
             </button>
           </div>
         </div>
+        
+        {error && <div className="bg-red-500 text-white p-4 rounded-lg shadow-md mb-8">{error}</div>}
 
         {/* Results Section */}
-        {error && (
-          <div className="bg-red-100 border-l-4 border-red-500 text-red-700 p-4 rounded-lg mb-6" role="alert">
-            <p className="font-bold">Error</p>
-            <p>{error}</p>
-          </div>
-        )}
-
         {processedData.length > 0 && (
-          <div className="mt-8">
-            <h2 className="text-2xl font-bold text-gray-700 dark:text-gray-300 mb-4">Resultados</h2>
-            <div className="flex justify-between items-center mb-4">
-              <p className="text-lg text-gray-600 dark:text-gray-400">
-                Proteínas encontradas: <span className="font-semibold text-indigo-600 dark:text-indigo-400">{processedData.length}</span>
-              </p>
-              <button
-                onClick={handleCopyTable}
-                className="py-2 px-4 bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded-md shadow hover:bg-gray-300 dark:hover:bg-gray-600 transition-colors duration-200"
-              >
-                Copiar Tabla
+          <div className="bg-white p-6 rounded-xl shadow-lg border border-gray-200">
+            <h2 className="text-2xl font-semibold text-gray-700 mb-4">Step 3: Results and Filters</h2>
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+              <input type="text" placeholder="Search..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} className="col-span-1 md:col-span-2 p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition duration-200" />
+              <input type="number" placeholder="Min. Total Peptides" value={minTotalPeptides} onChange={(e) => setMinTotalPeptides(e.target.value)} className="p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition duration-200" />
+              <input type="number" step="0.01" placeholder="Min. Area" value={minArea} onChange={(e) => setMinArea(e.target.value)} className="p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition duration-200" />
+              <input type="number" placeholder="Min. Unique Peptides" value={minUniquePeptides} onChange={(e) => setMinUniquePeptides(e.target.value)} className="p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition duration-200" />
+              <div className="flex items-center col-span-1 md:col-span-2 lg:col-span-1">
+                <input
+                  id="unitary-group-filter"
+                  type="checkbox"
+                  checked={showUnitaryGroupsOnly}
+                  onChange={(e) => setShowUnitaryGroupsOnly(e.target.checked)}
+                  className="h-4 w-4 text-blue-600 bg-gray-100 rounded border-gray-300 focus:ring-blue-500"
+                />
+                <label htmlFor="unitary-group-filter" className="ml-2 text-gray-600 font-medium cursor-pointer">
+                  Only Unitary Groups
+                </label>
+              </div>
+              <button onClick={handleExportToTxt} className="col-span-1 md:col-span-2 lg:col-span-1 bg-green-600 text-white font-semibold py-3 px-6 rounded-full shadow-lg hover:bg-green-700 transition duration-200 ease-in-out transform hover:scale-105">
+                Export to TXT
               </button>
             </div>
             
-            {/* Protein Table */}
-            <div className="overflow-x-auto bg-gray-50 dark:bg-gray-800 rounded-xl shadow-md">
-              <table id="protein-table" className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
-                <thead className="bg-gray-100 dark:bg-gray-700">
+            <div className="overflow-x-auto rounded-lg shadow-md">
+              <table className="min-w-full bg-white border-collapse">
+                <thead className="bg-gray-200 text-gray-700 uppercase text-sm leading-normal">
                   <tr>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Muestra</th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Grupo Proteico</th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Acceso</th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Descripción</th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Enfermedad Asociada</th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Área</th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Péptidos Totales</th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Péptidos Únicos</th>
+                    <th className="py-3 px-6 text-left">Accession ID</th>
+                    <th className="py-3 px-6 text-left">Description</th>
+                    <th className="py-3 px-6 text-left">Sample</th>
+                    <th className="py-3 px-6 text-left">Association</th>
+                    <th className="py-3 px-6 text-left">Unitary Group</th>
+                    <th className="py-3 px-6 text-left">Area</th>
+                    <th className="py-3 px-6 text-left">Total Peptides</th>
+                    <th className="py-3 px-6 text-left">Unique Peptides</th>
+                    <th className="py-3 px-6 text-left">Actions</th>
                   </tr>
                 </thead>
-                <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
-                  {processedData.map((protein, index) => (
+                <tbody className="text-gray-600 text-sm font-light">
+                  {filteredData.map((protein, index) => (
                     <React.Fragment key={index}>
-                      <tr 
-                        onClick={() => toggleExpand(index)} 
-                        className="hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors duration-200 cursor-pointer"
-                      >
-                        <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-gray-100">{protein.sampleName}</td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-gray-100">{protein.proteinGroup}</td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-gray-100">{protein.accession}</td>
-                        <td className="px-6 py-4 text-sm text-gray-500 dark:text-gray-400">{protein.description}</td>
-                        <td className="px-6 py-4 text-sm text-gray-500 dark:text-gray-400">{protein.diseaseAssociation}</td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">{protein.area.toFixed(2)}</td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">{protein.totalPeptides}</td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">{protein.uniquePeptidesCount}</td>
+                      <tr className="border-b border-gray-200 hover:bg-gray-100 transition duration-200">
+                        <td className="py-3 px-6 whitespace-nowrap">{protein.accession}</td>
+                        <td className="py-3 px-6">{protein.description}</td>
+                        <td className="py-3 px-6">{protein.sampleName}</td>
+                        <td className="py-3 px-6">{protein.diseaseAssociation}</td>
+                        <td className="py-3 px-6">{protein.isUnitaryGroup ? 'Yes' : 'No'}</td>
+                        <td className="py-3 px-6">{protein.area.toFixed(2)}</td>
+                        <td className="py-3 px-6">{protein.totalPeptides}</td>
+                        <td className="py-3 px-6">{protein.uniquePeptidesCount}</td>
+                        <td className="py-3 px-6">
+                          <button onClick={() => toggleRow(index)} className="bg-blue-500 text-white py-1 px-3 rounded-full text-xs hover:bg-blue-600 transition duration-200">
+                            {expandedRow === index ? 'Close' : 'View Peptides'}
+                          </button>
+                        </td>
                       </tr>
                       {expandedRow === index && (
-                        <tr className="expanded-row">
-                          <td colSpan="8" className="p-4">
-                            <h4 className="text-md font-bold mb-2">Lista de Péptidos Únicos:</h4>
-                            <ul className="list-disc list-inside space-y-1 text-sm text-gray-600 dark:text-gray-400">
+                        <tr className="bg-gray-50 border-b border-gray-200">
+                          <td colSpan="9" className="p-4">
+                            <h4 className="text-sm font-bold text-gray-700 mb-2">Unique Peptides:</h4>
+                            <ul className="list-disc list-inside space-y-1 text-sm text-gray-600">
                               {protein.uniquePeptides.length > 0 ? (
                                 protein.uniquePeptides.map((peptide, pIndex) => (
                                   <li key={pIndex}>{peptide}</li>
                                 ))
                               ) : (
-                                <li>No hay péptidos únicos asociados.</li>
+                                <li>No unique peptides associated.</li>
                               )}
                             </ul>
                           </td>
@@ -569,16 +472,9 @@ const App = () => {
             </div>
           </div>
         )}
-
-        {/* Custom Copy Message */}
-        {copyMessage && (
-            <div className={`fixed bottom-4 right-4 p-3 rounded-lg shadow-lg text-white transition-opacity duration-300 ${copyMessage.isError ? 'bg-red-500' : 'bg-green-500'}`}>
-                {copyMessage.message}
-            </div>
-        )}
       </div>
     </div>
   );
 };
-
+        
 export default App;
