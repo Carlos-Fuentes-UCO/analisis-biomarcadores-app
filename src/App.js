@@ -329,7 +329,7 @@ const App = () => {
       <div className="container mx-auto px-4 max-w-7xl">
         {/* Header */}
         <header className="text-center mb-12">
-          <h1 className="text-4xl font-bold text-gray-800 mb-2">Pathogenic Variants Analysis</h1>
+          <h1 className="text-4xl font-bold text-gray-800 mb-2">Pathogenical Variants Analysis</h1>
           <p className="text-lg text-gray-600">Unify, analyze, and visualize protein and peptide data from different samples.</p>
         </header>
 
